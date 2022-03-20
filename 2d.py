@@ -10,12 +10,11 @@ res = 512
 grid = 16
 radius = 20
 diameter = 2 * radius
-ti.init(arch=ti.cuda)
+ti.init(arch=ti.x64)
 ex = ti.Vector([1.,0.])
 ey = ti.Vector([0.,1.])
 linear_dict = {
     'x': ti.Vector.field(dim, dtype = float), # center
-    'R': ti.Matrix.field(dim,dim, dtype = float), # rotation matrix
     'r': ti.Vector.field(2, dtype = float), # rotation in complex number
     'l': ti.field(dtype = ti.i32),  # length
 }
@@ -28,11 +27,24 @@ tot_sdf = ti.field(float, ())
 ti.root.lazy_grad()
 
 @ti.func
-def inv(c):    # 1/ c
-    
-    # return ti.Vector([c[0], -c[1]]) / c.norm_sqr()   
+def inv(c):    # 1/ c    
     return ti.Vector([c[1],-c[0]])
 
+@ti.func
+def R(r):
+    return ti.Matrix.cols([r,inv(r)])
+@ti.func
+def signed_distance(i, I):  # i: index of brick; I: pos
+    r,l,x = bricks[i].r, bricks[i].l, bricks[i].x
+    Rm = R(r)
+    p = I - x
+    p = Rm @ p
+    ret = 0.
+    if 0 < p.x < (l-1) * diameter/res:
+        ret = ti.abs(p.y)
+    else : 
+        ret = ti.min(p.norm(), (p - (l-1) * diameter/res * ex).norm())
+    return ret
 
 @ti.kernel
 def init():
@@ -40,22 +52,14 @@ def init():
         index[I] = (I + 0.5) / grid
     bricks[0] = ti.Struct({
         'x': ti.Vector([0.2, 0.5]), # center
-        'R': ti.Matrix.zero(float, 2,2), # rotation matrix
         'r': ti.Vector([1., 0.]), # rotation in complex number
         'l': 7,  # length
     })
-    t = bricks[0].r
-    bricks[0].R = ti.Matrix.cols([t,inv(t)])
 
 @ti.kernel
-def calc_sdf(t: ti.template(),l: ti.template(),m: ti.template(),x: ti.template()):
+def grid_sdf():
     for I in ti.grouped(sdf):
-        p = index[I] - x
-        p = m @ p
-        if 0 < p.x < (l-1) * diameter/res:
-            sdf[I] = ti.abs(p.y)
-        else : 
-            sdf[I] = ti.min(p.norm(), (p - (l-1) * diameter/res * ex).norm())
+        sdf[I] = signed_distance(0,index[I])
         tot_sdf[None] += sdf[I]
 
 def draw_all(ggui):
@@ -63,20 +67,49 @@ def draw_all(ggui):
     l,x,r = [to_np(i) for i in ['l','x','r']]
     ggui.lines(r,l,x, radius) 
     
-
+@ti.kernel
+def update(x:ti.ext_arr(), cnt: ti.i32):
+    bricks[cnt].r = ti.Vector([x[0],x[1]]).normalized()
+    # print(cnt, bricks[cnt].r)
 # window = ti.ui.Window('Implicit Mass Spring System', res=(500, 500))
 gui = ti.GUI("Vector Field", res=(res, res))
-
-
+        
 init()
-r,l,R,x = bricks[0].r, bricks[0].l, bricks[0].R, bricks[0].x
 with ti.Tape(tot_sdf):
-    calc_sdf(r,l,R,x)
+    grid_sdf()
 _grid = index.to_numpy().reshape((-1,2))
 _grad = index.grad.to_numpy().reshape((-1,2)) / 40.0
-print(_grad, r,l, R, x)
-for k in range(1000000):
-    gui.line(x, x + (l-1) * diameter/res * ex, color = 0xFFFFFF, radius = radius)
+# print(_grad)
+cnt = 0
+mxy = np.zeros((2,2),dtype = np.float32)
+mcnt = 0
+normalize = lambda x: x/np.linalg.norm(x)
+while gui.running:
+    if gui.get_event(ti.GUI.PRESS):
+        e = gui.event
+        print(e.key)
+        if e.key == ti.GUI.LMB:
+            mxy = np.array(gui.get_cursor_pos(), dtype=np.float32) 
+            mcnt = not mcnt
+            print(mxy, mcnt,cnt)
+            if mcnt :
+                bricks[cnt] = ti.Struct({
+                    'x': ti.Vector(mxy), # center
+                    'r': ti.Vector([1., 0.]), # rotation in complex number
+                    'l': 7,  # length
+                })
+            else:
+                cnt += 1      
+    elif mcnt :
+        m = np.array(gui.get_cursor_pos())
+        update(m-mxy,cnt)
+        r,l,x = bricks[cnt].r, bricks[cnt].l, bricks[cnt].x
+        gui.line(x, x + (l-1) * diameter/res * r, color = 0x888888, radius = radius)
+
+    to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
+    l,x,r = [to_np(i,cnt-mcnt) for i in ['l','x','r']]
+    if len(l):
+        gui.lines(x, x + 6 * diameter/res * r, color = 0xFFFFFF, radius = radius)
     gui.circles(_grid, radius=3)
     gui.arrows(_grid, _grad, radius = 1)
     gui.show()
