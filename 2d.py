@@ -9,6 +9,7 @@ chunk = 1
 res = 512
 grid = 16
 radius = 20
+Radius = 18
 diameter = 2 * radius
 ti.init(arch=ti.x64)
 ex = ti.Vector([1.,0.])
@@ -57,9 +58,9 @@ def init():
     })
 
 @ti.kernel
-def grid_sdf():
+def grid_sdf(t: ti.i32):
     for I in ti.grouped(sdf):
-        sdf[I] = signed_distance(0,index[I])
+        sdf[I] = signed_distance(t,index[I])
         tot_sdf[None] += sdf[I]
 
 def draw_all(ggui):
@@ -71,15 +72,20 @@ def draw_all(ggui):
 def update(x:ti.ext_arr(), cnt: ti.i32):
     bricks[cnt].r = ti.Vector([x[0],x[1]]).normalized()
     # print(cnt, bricks[cnt].r)
+
+def update_sdf(cnt):
+    with ti.Tape(tot_sdf):
+        grid_sdf(cnt)
+    _grid = index.to_numpy().reshape((-1,2))
+    _grad = index.grad.to_numpy().reshape((-1,2)) / 40.0
+    return _grid, _grad
+    # print(_grad)
+
 # window = ti.ui.Window('Implicit Mass Spring System', res=(500, 500))
 gui = ti.GUI("Vector Field", res=(res, res))
         
 init()
-with ti.Tape(tot_sdf):
-    grid_sdf()
-_grid = index.to_numpy().reshape((-1,2))
-_grad = index.grad.to_numpy().reshape((-1,2)) / 40.0
-# print(_grad)
+_grid, _grad = update_sdf(0)
 cnt = 0
 mxy = np.zeros((2,2),dtype = np.float32)
 mcnt = 0
@@ -99,17 +105,22 @@ while gui.running:
                     'l': 7,  # length
                 })
             else:
+                _grid, _grad = update_sdf(cnt)
                 cnt += 1      
     elif mcnt :
         m = np.array(gui.get_cursor_pos())
         update(m-mxy,cnt)
         r,l,x = bricks[cnt].r, bricks[cnt].l, bricks[cnt].x
-        gui.line(x, x + (l-1) * diameter/res * r, color = 0x888888, radius = radius)
+        gui.line(x, x + (l-1) * diameter/res * r, color = 0x444444, radius = radius)
+        gui.circle(x, color = 0x0, radius = Radius)
 
     to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
     l,x,r = [to_np(i,cnt-mcnt) for i in ['l','x','r']]
     if len(l):
-        gui.lines(x, x + 6 * diameter/res * r, color = 0xFFFFFF, radius = radius)
+        gui.lines(x, x + 6 * diameter/res * r, color = 0x888888, radius = radius)
+        gui.circles(x, radius = Radius, color = 0x0)
+
+    
     gui.circles(_grid, radius=3)
     gui.arrows(_grid, _grad, radius = 1)
     gui.show()
