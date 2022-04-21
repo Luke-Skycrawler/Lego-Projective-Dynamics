@@ -19,10 +19,10 @@ ti.init(arch=ti.x64)
 ex = ti.Vector([1.,0.])
 ey = ti.Vector([0.,1.])
 linear_dict = {
-    'x': ti.Vector.field(dim, dtype = float), # end
-    'y': ti.Vector.field(dim, dtype = float), # end
-    'r': ti.Vector.field(2, dtype = float), # rotation in complex number
-    'l': ti.field(dtype = ti.i32),  # length
+    'x': ti.Vector.field(dim, dtype = float, needs_grad = True), # end
+    'y': ti.Vector.field(dim, dtype = float, needs_grad = True), # end
+    'r': ti.Vector.field(2, dtype = float, needs_grad = True), # rotation in complex number
+    'l': ti.field(dtype = ti.i32, needs_grad= True),  # length
 }
 bricks = ti.StructField(linear_dict)
 container = ti.root.pointer(ti.i, max_bricks)
@@ -97,8 +97,6 @@ def ve(i: ti.i32):
         yc = signed_distance(bricks[i].y, J) < Diameter
         update_fenwick(xc, i,J)
         update_fenwick(yc, i,J)
-        if (xc or yc) and J!= i:
-            print('e')
 
 @ti.kernel
 def ev(I:ti.i32):
@@ -106,20 +104,33 @@ def ev(I:ti.i32):
         t = min(signed_distance(bricks[j].x, I), signed_distance(bricks[j].y, I)) < Diameter
         # TODO: watch out the sdf 
         update_fenwick(t, j,I)
-        if t and j!= I:
-            print('v')
     
-@ti.kernel
-def ee(i: ti.i32):
-    for j in bricks:
-        print(bricks[j].x.grad[0])
-        t = (bricks[j].r @ bricks[j].x.grad) * (bricks[j].r @ bricks[j].grad.y) < 0
-        update_fenwick(t, i,j)
+# @ti.kernel
+# def _ee(i: ti.i32):
+#     for j in bricks:
+#         t = (bricks[j].r.transpose() @ bricks.x.grad[j]) * (bricks[j].r.transpose() @ bricks.y.grad[j]) < 0
+#         update_fenwick(t[0], i,j)
+
+# def sdf_gradient(I): # sdf gradient of brick I at ends of other bricks 
+#     tot_sdf[None] = 0.
+#     with ti.Tape(tot_sdf):
+#         _grad_sdf(I)
+
+# @ti.kernel
+# def _grad_sdf(I:ti.i32):
+#     for j in bricks:
+#         tot_sdf[None] += signed_distance(bricks[j].x, I) + signed_distance(bricks[j].y, I)
 
 @ti.kernel
-def _grad_sdf(I:ti.i32):
+def ee(i:ti.i32):
     for j in bricks:
-        tot_sdf[None] += signed_distance(bricks[j].x, I) + signed_distance(bricks[j].y, I)
+        m11 = ti.Matrix.cols([bricks[j].x-bricks[i].x, bricks[i].r])
+        m12 = ti.Matrix.cols([bricks[j].y-bricks[i].y, bricks[i].r])
+        m21 = ti.Matrix.cols([bricks[j].x-bricks[i].x, bricks[j].r])
+        m22 = ti.Matrix.cols([bricks[j].y-bricks[i].y, bricks[j].r])
+        t = m11.determinant() * m12.determinant() < 0 and m21.determinant() * m22.determinant() < 0
+        update_fenwick(t, i, j)
+
 
     
 @ti.kernel
@@ -128,10 +139,6 @@ def collision_projection(i: ti.i32):
         pass
         # if xc(j):
 
-def sdf_gradient(I): # sdf gradient of brick I at ends of other bricks 
-    tot_sdf[None] = 0.
-    with ti.Tape(tot_sdf):
-        _grad_sdf(I)
         
 @ti.kernel
 def check_fenwick(I:ti.i32, cnt: ti.i32) -> ti.i32:
@@ -140,56 +147,6 @@ def check_fenwick(I:ti.i32, cnt: ti.i32) -> ti.i32:
         if i != I and tmp_dense_matrix[i,I]:
             ret = 1
     return ret
-# @ti.kernel
-# def detect(i: ti.i32):
-#     for j in bricks:
-#         if j != i:
-#             tot_sdf[None] += signed_distance(j, bricks[i].x) + signed_distance(j, bricks[i].y)
-#             # tot_sdf[None] += signed_distance(i, bricks[j].x) + signed_distance(i, bricks[j].y)
-    
-# @ti.func
-# def _mid(i, rj, xj1, xj2):
-#     ret = 0
-#     # signed_distance.grad(i, xj1)
-#     # signed_distance.grad(i, xj2)
-#     gj1 = xj1.grad
-#     gj2 = xj2.grad
-#     if gj1 @ rj > 0 and gj2 @ rj < 0 :
-#         ret = 1
-#     return ret
-
-# @ti.func
-# def _fetch_r12(j):
-#     xj1 = bricks[j].x
-#     xj2 = xj1 + r * worldl(bricks[j].l)
-#     rj = bricks[j].r
-#     return rj, xj1, xj2
-
-# @ti.kernel
-# def settle_y(j):
-#     xj1 = bricks[j].x
-#     xj2 = xj1 + bricks[j].r * worldl(bricks[j].l)
-#     bricks[j].y = xj2
-
-# def collision_update(cnt):
-#     settle_y(cnt)
-#     tot_sdf[None] = 0.
-#     with ti.Tape(tot_sdf):
-#         detect(cnt)
-    
-# def _point_edge(j, i):
-#     return min(signed_distance(i, bricks[j].x), signed_distance(i, bricks[j].y))
-# @ti.kernel
-# def collision_ee(i: ti.i32, j:ti.i32) -> ti.i32:
-#     ret = 0
-#     rj, xj1, xj2 = _fetch_r12(j)
-#     ri, xi1, xi2 = _fetch_r12(i)
-
-#     if ti.min(_point_edgeh ) < 2 * radius:
-#         ret = 1 # point-edge contact
-#     elif  _mid(i, rj, xj1, xj2) and _mid(j, i, xi1, xi2):
-#         ret = 2 # edge crossed 
-#     return ret
 
 def probe_grid_sdf(cnt):
     with ti.Tape(tot_sdf):
@@ -233,11 +190,10 @@ while gui.running:
         t1 = check_fenwick(cnt, cnt)
         ve(cnt)
         t2 = check_fenwick(cnt, cnt)
-        sdf_gradient(cnt)
-        # ee(cnt)
-        # tot = np.sum(tmp_dense_matrix.to_numpy())
-        # print(tot)
-        color = 0x440000 if t1 or t2 else 0x444444 
+        ee(cnt)
+        t3 = check_fenwick(cnt, cnt)
+        
+        color = 0x440000 if t1 or t2 or t3 else 0x444444 
         r,l,x,y = bricks[cnt].r, bricks[cnt].l, bricks[cnt].x, bricks[cnt].y
         gui.line(x, y, color = color, radius = radius)
         gui.circle(x, color = 0x0, radius = Radius)
