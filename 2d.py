@@ -14,7 +14,8 @@ zero = -1e-9
 Diameter = diameter / res
 worldl = lambda l: (l-1) * Diameter
 n_jacobian_iters = 40
-
+allow_cross = False
+flight = 5e-3
 ti.init(arch=ti.x64)
 ex = ti.Vector([1.,0.])
 ey = ti.Vector([0.,1.])
@@ -52,8 +53,8 @@ def R(r):
     return ti.Matrix.cols([r,inv(r)])
 @ti.func
 def signed_distance(x_j, I):  # I: index of brick; x_j: pos
-    r,l,x = bricks[I].r, bricks[I].l, bricks[I].x
-    Rm = R(r)
+    l,x,y = bricks[I].l, bricks[I].x, bricks[I].y,
+    Rm = R((y-x).normalized())
     p = x_j - x
     p = Rm @ p
     ret = 0.
@@ -118,8 +119,7 @@ def ve(i: ti.i32):
     for J in bricks:
         xc = signed_distance(bricks[i].x, J) < Diameter
         yc = signed_distance(bricks[i].y, J) < Diameter
-        update_fenwick(xc, i,J)
-        update_fenwick(yc, i,J)
+        update_fenwick(xc or yc, i,J)
 
 @ti.kernel
 def ev(I:ti.i32):
@@ -156,10 +156,11 @@ def ee(i:ti.i32):
 
 @ti.func
 def nebla_sdf(x, J):
-    t =  R(bricks[J].r) @ (x - bricks[J].x)
+    r = (bricks[J].y - bricks[J].x).normalized()
+    t =  R(r) @ (x - bricks[J].x)
     ret = ti.Vector.zero(float, 2)
     if 0 < t.x < worldl(7):
-        ret = inv(bricks[J].r) * (1 if t.y > 0 else -1)
+        ret = inv(r) * (1 if t.y > 0 else -1)
     elif t.x < 0:
         ret = (x - bricks[J].x).normalized()
     else:
@@ -193,22 +194,27 @@ def project_local(cnt: ti.i32):   # local step for all bricks
 
 
 @ti.kernel
-def minimize_global():
+def minimize_global(cnt: ti.i32):
     for i in bricks:
+        t1, t2 = bricks[i].x, bricks[i].y
         bricks[i].x += p_x[i]/ contacts[i]
         bricks[i].y += p_y[i]/ contacts[i]
 
         bricks[i].x *= contacts[i]/(contacts[i]+1)
         bricks[i].y *= contacts[i]/(contacts[i]+1)
 
-        bricks[i].x += s_x[i] * 1/(contacts[i] +1) 
-        bricks[i].y += s_y[i] * 1/(contacts[i] +1) 
+        bricks[i].x += s_x[i] /(contacts[i] +1) 
+        bricks[i].y += s_y[i] /(contacts[i] +1) 
+        t3, t4 = bricks[i].x, bricks[i].y
+        if i == cnt-1:
+            print(f'residual :{(t3-t1).norm()}, {(t4-t2).norm()}, contacts: {contacts[i]}')
         
 def solve_local_global(cnt): 
     copy_x_to_s()
     for i in range(n_jacobian_iters):
+        print(f'iter{i}')
         project_local(cnt)
-        minimize_global()
+        minimize_global(cnt)
     
 @ti.kernel
 def collision_projection(i: ti.i32):
@@ -243,13 +249,14 @@ cnt = 0
 mxy = np.zeros((2,2),dtype = np.float32)
 mcnt = 0
 normalize = lambda x: x/np.linalg.norm(x)
+t3 = False
 while gui.running:
     
     to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
     l,x,y,r = [to_np(i,cnt-mcnt) for i in ['l','x','y','r']]
     if len(l):
         gui.lines(x, y, color = 0x888888, radius = radius)
-        gui.circles(x, radius = Radius, color = 0x0)
+        gui.circles(np.vstack([x, y]), radius = Radius, color = 0x0)
 
     
     gui.circles(_grid, radius=3)
@@ -258,18 +265,21 @@ while gui.running:
     if gui.get_event(ti.GUI.PRESS):
         e = gui.event
         print(e.key)
+        if e.key == 'r':
+            container.deactivate_all()
+            cnt = 0
         if e.key == ti.GUI.LMB:
             mxy = np.array(gui.get_cursor_pos(), dtype=np.float32) 
-            mcnt = not mcnt
+            mcnt = not mcnt if not (t3 and not allow_cross) else mcnt
             print(mxy, mcnt,cnt)
-            if mcnt :
+            if mcnt:
                 bricks[cnt] = ti.Struct({
                     'x': ti.Vector(mxy), # center
                     'y': ti.Vector([0.,0.]), # center
                     'r': ti.Vector([1., 0.]), # rotation in complex number
                     'l': 7,  # length
                 })
-            else:
+            elif not (t3 and not allow_cross):
                 _grid, _grad = probe_grid_sdf(cnt)
                 cnt += 1      
                 solve_local_global(cnt)
@@ -285,7 +295,7 @@ while gui.running:
         ee(cnt)
         t3 = check_fenwick(cnt, cnt)
         
-        color = 0x440000 if t1 or t2 else 0x880000 if t3 else 0x444444 
+        color = 0x880000 if t3 else 0x440000 if t1 or t2 else  0x444444 
         r,l,x,y = bricks[cnt].r, bricks[cnt].l, bricks[cnt].x, bricks[cnt].y
         gui.line(x, y, color = color, radius = radius)
         gui.circle(x, color = 0x0, radius = Radius)
