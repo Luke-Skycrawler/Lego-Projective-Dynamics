@@ -1,3 +1,4 @@
+from attr import get_run_validators
 import taichi as ti
 import numpy as np 
 # (x|y|r)\[(.)\]    bricks[$2].$1
@@ -13,7 +14,9 @@ diameter = 2 * radius
 zero = -1e-9
 Diameter = diameter / res
 worldl = lambda l: (l-1) * Diameter
-n_jacobian_iters = 40
+n_jacobian_iters = 100
+dt = 1e-4
+debug = False
 allow_cross = False
 flight = 5e-3
 ti.init(arch=ti.x64)
@@ -30,11 +33,14 @@ p_x = ti.Vector.field(dim, dtype = float)
 p_y = ti.Vector.field(dim, dtype = float)
 s_x = ti.Vector.field(dim, dtype = float)
 s_y = ti.Vector.field(dim, dtype = float)
-
+v_x = ti.Vector.field(dim, dtype = float)
+v_y = ti.Vector.field(dim, dtype = float)
+q_x = ti.Vector.field(dim, dtype = float)
+q_y = ti.Vector.field(dim, dtype = float)
 bricks = ti.StructField(linear_dict)
 container = ti.root.pointer(ti.i, max_bricks)
 container.place(bricks)
-container.place(p_x, p_y, s_x, s_y, contacts)
+container.place(p_x, p_y, s_x, s_y, v_x, v_y, q_x, q_y, contacts)
 probes = ti.Vector.field(2, float, (grid,grid))
 sdf = ti.field(float, (grid, grid))
 tot_sdf = ti.field(float, ())
@@ -147,10 +153,10 @@ def ev(I:ti.i32):
 @ti.kernel
 def ee(i:ti.i32):
     for j in bricks:
-        m11 = ti.Matrix.cols([bricks[j].x-bricks[i].x, bricks[i].r])
-        m12 = ti.Matrix.cols([bricks[j].y-bricks[i].y, bricks[i].r])
-        m21 = ti.Matrix.cols([bricks[j].x-bricks[i].x, bricks[j].r])
-        m22 = ti.Matrix.cols([bricks[j].y-bricks[i].y, bricks[j].r])
+        m11 = ti.Matrix.cols([bricks[j].x-bricks[i].x, (bricks[i].y - bricks[i].x).normalized()])
+        m12 = ti.Matrix.cols([bricks[j].y-bricks[i].y, (bricks[i].y - bricks[i].x).normalized()])
+        m21 = ti.Matrix.cols([bricks[j].x-bricks[i].x, (bricks[j].y - bricks[i].x).normalized()])
+        m22 = ti.Matrix.cols([bricks[j].y-bricks[i].y, (bricks[j].y - bricks[i].x).normalized()])
         t = m11.determinant() * m12.determinant() < 0 and m21.determinant() * m22.determinant() < 0
         update_fenwick(t, i, j)
 
@@ -168,19 +174,27 @@ def nebla_sdf(x, J):
     return ret
     
 @ti.kernel
-def copy_x_to_s():
+def copy_x_to_s(f_x: ti.template(), f_y: ti.template()):
     for i in bricks:
-        s_x[i] = bricks[i].x
-        s_y[i] = bricks[i].y
+        f_x[i] = bricks[i].x
+        f_y[i] = bricks[i].y
 
 @ti.kernel
 def project_local(cnt: ti.i32):   # local step for all bricks 
-    
+
     for I in bricks:
         p_x[I] = p_y[I] = ti.Vector.zero(float, 2)
         contacts[I] = 1
         p_x[I] += (bricks[I].y - bricks[I].x) * (1-worldl(7)/(bricks[I].y-bricks[I].x).norm()) / 2
         p_y[I] -= (bricks[I].y - bricks[I].x) * (1-worldl(7)/(bricks[I].y-bricks[I].x).norm()) / 2
+        # boundary conditions
+        p_x[I].y += max(Diameter /2 - bricks[I].x.y, 0)
+        p_y[I].y += max(Diameter /2 - bricks[I].y.y, 0)
+        p_x[I].x += max(Diameter /2 - bricks[I].x.x, 0)
+        p_y[I].x += max(Diameter /2 - bricks[I].y.x, 0)
+        p_x[I].x -= max(Diameter /2 - (1- bricks[I].x.x), 0)
+        p_y[I].x -= max(Diameter /2 - (1- bricks[I].y.x), 0)
+
         for j in range(cnt):
             if j != I and contact(I,j):
                 if contact_ev(I,j):
@@ -206,13 +220,14 @@ def minimize_global(cnt: ti.i32):
         bricks[i].x += s_x[i] /(contacts[i] +1) 
         bricks[i].y += s_y[i] /(contacts[i] +1) 
         t3, t4 = bricks[i].x, bricks[i].y
-        if i == cnt-1:
+        if i == cnt-1 and debug:
             print(f'residual :{(t3-t1).norm()}, {(t4-t2).norm()}, contacts: {contacts[i]}')
         
 def solve_local_global(cnt): 
-    copy_x_to_s()
+    copy_x_to_s(s_x, s_y)
     for i in range(n_jacobian_iters):
-        print(f'iter{i}')
+        if debug:
+            print(f'iter{i}')
         project_local(cnt)
         minimize_global(cnt)
     
@@ -230,6 +245,20 @@ def check_fenwick(I:ti.i32, cnt: ti.i32) -> ti.i32:
         if i != I and tmp_dense_matrix[i,I]:
             ret = 1
     return ret
+
+@ti.kernel
+def add_gravity():
+    for i in bricks:
+        v_x[i] += ti.Vector([0.0, -5])
+        v_y[i] += ti.Vector([0.0, -5])
+        bricks[i].x += v_x[i] * dt
+        bricks[i].y += v_y[i] * dt
+        
+@ti.kernel
+def update_velocity():
+    for i in bricks:
+        v_x[i] = (bricks[i].x - q_x[i]) / dt
+        v_y[i] = (bricks[i].y - q_y[i]) / dt
 
 def probe_grid_sdf(cnt):
     # with ti.Tape(tot_sdf):
@@ -250,6 +279,7 @@ mxy = np.zeros((2,2),dtype = np.float32)
 mcnt = 0
 normalize = lambda x: x/np.linalg.norm(x)
 t3 = False
+gravity = False
 while gui.running:
     
     to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
@@ -261,14 +291,20 @@ while gui.running:
     
     gui.circles(_grid, radius=3)
     gui.arrows(_grid, _grad, radius = 1)
-    
+    if gravity:
+        copy_x_to_s(q_x,q_y)
+        add_gravity()
+        solve_local_global(cnt)
+        update_velocity()
     if gui.get_event(ti.GUI.PRESS):
         e = gui.event
         print(e.key)
         if e.key == 'r':
             container.deactivate_all()
             cnt = 0
-        if e.key == ti.GUI.LMB:
+        elif e.key == 's':
+            gravity = not gravity
+        elif e.key == ti.GUI.LMB:
             mxy = np.array(gui.get_cursor_pos(), dtype=np.float32) 
             mcnt = not mcnt if not (t3 and not allow_cross) else mcnt
             print(mxy, mcnt,cnt)
