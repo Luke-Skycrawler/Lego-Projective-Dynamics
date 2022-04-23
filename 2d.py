@@ -1,7 +1,6 @@
-from matplotlib import container
 import taichi as ti
 import numpy as np 
-# (x|y)\[(.)\]    bricks[$2].$1
+# (x|y|r)\[(.)\]    bricks[$2].$1
 
 dim = 2
 max_bricks = 1000
@@ -14,6 +13,7 @@ diameter = 2 * radius
 zero = -1e-9
 Diameter = diameter / res
 worldl = lambda l: (l-1) * Diameter
+n_jacobian_iters = 40
 
 ti.init(arch=ti.x64)
 ex = ti.Vector([1.,0.])
@@ -24,13 +24,20 @@ linear_dict = {
     'r': ti.Vector.field(2, dtype = float, needs_grad = True), # rotation in complex number
     'l': ti.field(dtype = ti.i32, needs_grad= True),  # length
 }
+contacts = ti.field(dtype = ti.i32)
+p_x = ti.Vector.field(dim, dtype = float)
+p_y = ti.Vector.field(dim, dtype = float)
+s_x = ti.Vector.field(dim, dtype = float)
+s_y = ti.Vector.field(dim, dtype = float)
+
 bricks = ti.StructField(linear_dict)
 container = ti.root.pointer(ti.i, max_bricks)
 container.place(bricks)
+container.place(p_x, p_y, s_x, s_y, contacts)
 probes = ti.Vector.field(2, float, (grid,grid))
 sdf = ti.field(float, (grid, grid))
 tot_sdf = ti.field(float, ())
-tmp_dense_matrix = ti.field(ti.int8, (100,100))
+tmp_dense_matrix = ti.field(ti.u8, (100,100))
 
 
 ti.root.lazy_grad()
@@ -72,11 +79,16 @@ def grid_sdf(t: ti.i32):
     for I in ti.grouped(sdf):
         sdf[I] = signed_distance(probes[I], t)
         tot_sdf[None] += sdf[I]
+@ti.kernel
+def test_wrapper(cnt: ti.i32):
+    for i in ti.grouped(probes):
+        probes.grad[i] = nebla_sdf(probes[i], cnt)
 
-def draw_all(ggui):
-    to_np = lambda x: bricks.get_member_field(x).to_numpy()
-    l,x,r = [to_np(i) for i in ['l','x','r']]
-    ggui.lines(r,l,x, radius) 
+
+# def draw_all(ggui):
+#     to_np = lambda x: bricks.get_member_field(x).to_numpy()
+#     l,x,r = [to_np(i) for i in ['l','x','r']]
+#     ggui.lines(r,l,x, radius) 
     
 @ti.kernel
 def preview_brick(arr:ti.ext_arr(), cnt: ti.i32):
@@ -89,6 +101,17 @@ def update_fenwick(boolean, i, j): # collision at point x/y
     # pass
     tmp_dense_matrix[i,j] = boolean
     tmp_dense_matrix[j,i] = boolean
+
+@ti.func
+def contact(i,j):
+    xc = signed_distance(bricks[i].x, j) < Diameter
+    yc = signed_distance(bricks[i].y, j) < Diameter
+    return xc or yc or contact_ev(i,j)
+
+@ti.func
+def contact_ev(i,j):
+    return min(signed_distance(bricks[j].x, i), signed_distance(bricks[j].y, i)) < Diameter
+    # return tmp_dense_matrix[i,j] & 2
 
 @ti.kernel
 def ve(i: ti.i32):
@@ -131,7 +154,61 @@ def ee(i:ti.i32):
         t = m11.determinant() * m12.determinant() < 0 and m21.determinant() * m22.determinant() < 0
         update_fenwick(t, i, j)
 
+@ti.func
+def nebla_sdf(x, J):
+    t =  R(bricks[J].r) @ (x - bricks[J].x)
+    ret = ti.Vector.zero(float, 2)
+    if 0 < t.x < worldl(7):
+        ret = inv(bricks[J].r) * (1 if t.y > 0 else -1)
+    elif t.x < 0:
+        ret = (x - bricks[J].x).normalized()
+    else:
+        ret = (x - bricks[J].y).normalized()
+    return ret
+    
+@ti.kernel
+def copy_x_to_s():
+    for i in bricks:
+        s_x[i] = bricks[i].x
+        s_y[i] = bricks[i].y
 
+@ti.kernel
+def project_local(cnt: ti.i32):   # local step for all bricks 
+    
+    for I in bricks:
+        p_x[I] = p_y[I] = ti.Vector.zero(float, 2)
+        contacts[I] = 1
+        p_x[I] += (bricks[I].y - bricks[I].x) * (1-worldl(7)/(bricks[I].y-bricks[I].x).norm()) / 2
+        p_y[I] -= (bricks[I].y - bricks[I].x) * (1-worldl(7)/(bricks[I].y-bricks[I].x).norm()) / 2
+        for j in range(cnt):
+            if j != I and contact(I,j):
+                if contact_ev(I,j):
+                    contact_point = bricks[j].x if signed_distance(bricks[j].x, I) < signed_distance(bricks[j].y, I) else bricks[j].y
+                    p_x[I] -= (Diameter - signed_distance(contact_point, I)) * nebla_sdf(contact_point, I).normalized()
+                    p_y[I] -= (Diameter - signed_distance(contact_point, I)) * nebla_sdf(contact_point, I).normalized()
+                else:   # contact ve
+                    p_x[I] += max(-signed_distance(bricks[I].x, j) + Diameter, 0.) * nebla_sdf(bricks[I].x, j).normalized()
+                    p_y[I] += max(-signed_distance(bricks[I].y, j) + Diameter, 0.) * nebla_sdf(bricks[I].y, j).normalized()
+                contacts[I] += 1
+
+
+@ti.kernel
+def minimize_global():
+    for i in bricks:
+        bricks[i].x += p_x[i]/ contacts[i]
+        bricks[i].y += p_y[i]/ contacts[i]
+
+        bricks[i].x *= contacts[i]/(contacts[i]+1)
+        bricks[i].y *= contacts[i]/(contacts[i]+1)
+
+        bricks[i].x += s_x[i] * 1/(contacts[i] +1) 
+        bricks[i].y += s_y[i] * 1/(contacts[i] +1) 
+        
+def solve_local_global(cnt): 
+    copy_x_to_s()
+    for i in range(n_jacobian_iters):
+        project_local(cnt)
+        minimize_global()
     
 @ti.kernel
 def collision_projection(i: ti.i32):
@@ -149,8 +226,9 @@ def check_fenwick(I:ti.i32, cnt: ti.i32) -> ti.i32:
     return ret
 
 def probe_grid_sdf(cnt):
-    with ti.Tape(tot_sdf):
-        grid_sdf(cnt)
+    # with ti.Tape(tot_sdf):
+    #     grid_sdf(cnt)
+    test_wrapper(cnt)
     _grid = probes.to_numpy().reshape((-1,2))
     _grad = probes.grad.to_numpy().reshape((-1,2)) / 40.0
     return _grid, _grad
@@ -166,6 +244,17 @@ mxy = np.zeros((2,2),dtype = np.float32)
 mcnt = 0
 normalize = lambda x: x/np.linalg.norm(x)
 while gui.running:
+    
+    to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
+    l,x,y,r = [to_np(i,cnt-mcnt) for i in ['l','x','y','r']]
+    if len(l):
+        gui.lines(x, y, color = 0x888888, radius = radius)
+        gui.circles(x, radius = Radius, color = 0x0)
+
+    
+    gui.circles(_grid, radius=3)
+    gui.arrows(_grid, _grad, radius = 1)
+    
     if gui.get_event(ti.GUI.PRESS):
         e = gui.event
         print(e.key)
@@ -183,9 +272,12 @@ while gui.running:
             else:
                 _grid, _grad = probe_grid_sdf(cnt)
                 cnt += 1      
+                solve_local_global(cnt)
+                
     elif mcnt :
         m = np.array(gui.get_cursor_pos())
         preview_brick(m-mxy,cnt)
+        tmp_dense_matrix.fill(0)
         ev(cnt)
         t1 = check_fenwick(cnt, cnt)
         ve(cnt)
@@ -193,20 +285,10 @@ while gui.running:
         ee(cnt)
         t3 = check_fenwick(cnt, cnt)
         
-        color = 0x440000 if t1 or t2 or t3 else 0x444444 
+        color = 0x440000 if t1 or t2 else 0x880000 if t3 else 0x444444 
         r,l,x,y = bricks[cnt].r, bricks[cnt].l, bricks[cnt].x, bricks[cnt].y
         gui.line(x, y, color = color, radius = radius)
         gui.circle(x, color = 0x0, radius = Radius)
-
-    to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
-    l,x,y,r = [to_np(i,cnt-mcnt) for i in ['l','x','y','r']]
-    if len(l):
-        gui.lines(x, y, color = 0x888888, radius = radius)
-        gui.circles(x, radius = Radius, color = 0x0)
-
-    
-    gui.circles(_grid, radius=3)
-    gui.arrows(_grid, _grad, radius = 1)
     gui.show()
 
 # while window.running:
