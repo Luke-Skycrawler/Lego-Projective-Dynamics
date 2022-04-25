@@ -15,7 +15,8 @@ zero = -1e-9
 Diameter = diameter / res
 worldl = lambda l: (l-1) * Diameter
 n_jacobian_iters = 100
-dt = 1e-4
+n2_jacobian_iters = 10
+dt = 5e-4
 debug = False
 allow_cross = False
 flight = 5e-3
@@ -25,7 +26,6 @@ ey = ti.Vector([0.,1.])
 linear_dict = {
     'x': ti.Vector.field(dim, dtype = float, needs_grad = True), # end
     'y': ti.Vector.field(dim, dtype = float, needs_grad = True), # end
-    'r': ti.Vector.field(2, dtype = float, needs_grad = True), # rotation in complex number
     'l': ti.field(dtype = ti.i32, needs_grad= True),  # length
 }
 contacts = ti.field(dtype = ti.i32)
@@ -56,7 +56,7 @@ ti.root.lazy_grad()
 
 @ti.func
 def inv(c):    # 1/ c    
-    return ti.Vector([c[1],-c[0]])
+    return ti.Vector([c[1], -c[0]])
 
 @ti.func
 def R(r):
@@ -75,15 +75,24 @@ def signed_distance(x_j, I):  # I: index of brick; x_j: pos
     return ret
 
 @ti.kernel
-def init():
+def init() -> ti.i32:
     for I in ti.grouped(probes):
         probes[I] = (I + 0.5) / grid
+    x = ti.Vector([0.2, 0.05])
+    y = x + ti.Vector([1., 0.]) * worldl(7)
+    x2 = ti.Vector([0.2 + worldl(7)/2, 0.2])
+    y2 = x2 + ti.Vector([1., 1.]).normalized() * worldl(7)
     bricks[0] = ti.Struct({
-        'x': ti.Vector([0.2, 0.5]), 
-        'y': ti.Vector([0.,0.]),
-        'r': ti.Vector([1., 0.]), # rotation in complex number
+        'x': x, 
+        'y': y,
         'l': 7,  # length
     })
+    bricks[1] = ti.Struct({
+        'x': x2, 
+        'y': y2,
+        'l': 7,  # length
+    })
+    return 2
 
 @ti.kernel
 def grid_sdf(t: ti.i32):
@@ -103,9 +112,8 @@ def test_wrapper(cnt: ti.i32):
     
 @ti.kernel
 def preview_brick(arr:ti.ext_arr(), cnt: ti.i32):
-    r = bricks[cnt].r = ti.Vector([arr[0],arr[1]]).normalized()
+    r = ti.Vector([arr[0],arr[1]]).normalized()
     bricks[cnt].y = r * worldl(bricks[cnt].l) + bricks[cnt].x
-    # print(cnt, bricks[cnt].r)
 
 @ti.func
 def update_fenwick(boolean, i, j): # collision at point x/y
@@ -157,11 +165,12 @@ def ev(I:ti.i32):
 @ti.kernel
 def ee(i:ti.i32):
     for j in bricks:
-        r = (bricks[i].y - bricks[i].x).normalized()
-        m11 = ti.Matrix.cols([bricks[j].x-bricks[i].x, r])
-        m12 = ti.Matrix.cols([bricks[j].y-bricks[i].y, r])
-        m21 = ti.Matrix.cols([bricks[j].x-bricks[i].x, r])
-        m22 = ti.Matrix.cols([bricks[j].y-bricks[i].y, r])
+        r1 = bricks[i].y - bricks[i].x
+        r2 = bricks[j].y - bricks[j].x
+        m11 = ti.Matrix.cols([bricks[j].x-bricks[i].x, r1])
+        m12 = ti.Matrix.cols([bricks[j].y-bricks[i].y, r1])
+        m21 = ti.Matrix.cols([bricks[j].x-bricks[i].x, r2])
+        m22 = ti.Matrix.cols([bricks[j].y-bricks[i].y, r2])
         t = m11.determinant() * m12.determinant() < 0 and m21.determinant() * m22.determinant() < 0
         update_fenwick(t, i, j)
 
@@ -190,6 +199,43 @@ def contact_point_x_or_y(I,j):  # return 1 for x 0 for y
     contact_point = bricks[j].x if boolean else bricks[j].y
     return contact_point, boolean
 
+debug_solver = True
+@ti.func
+def solve_jacobian(A, b, x0): # solve x for A x = b
+    T = A - ti.Matrix.identity(float, 5)
+    for iter in range(n2_jacobian_iters):
+        x1 = b - T @ x0
+        if ti.static(debug_solver):
+            print(f'iter {iter}, x1 - x0 = {(x1-x0).norm()}')
+        x0 = x1
+    return x0
+
+# @ti.func
+# def collision_matrix(lam, coord):
+#     a21 = (lam - 0.5) / 2 - 1/12
+#     a22 = (lam - 0.5) / 2 + 1/12
+
+#     x, y = coord.x, coord.y
+#     a43, a44, a45 = y, y, x
+#     a54, a55 = x, -y
+#     A = ti.Matrix.rows(
+#         [[1., 1., 1., 1., 0.],
+#          [a21, a22, 0., 0., 0.],
+#          [lam, 1-lam, -1, 0., 0.],
+#          [0., 0., a43, a44, a45],
+#          [0., 0., 0., a54, a55]
+#         ])
+#     return A
+
+@ti.func
+def collision_matrix(lam):
+    A = ti.Matrix.rows([
+        [1., 1., 1., 1.],
+        [lam - 1/3, lam - 2/3, 0., 0.],
+        [lam, 1-lam, -1., 0.],
+        [0., 0., 1., -1.]
+    ])
+    return A
 @ti.kernel
 def project_local(cnt: ti.i32):   # local step for all bricks 
 
@@ -221,17 +267,27 @@ def project_local(cnt: ti.i32):   # local step for all bricks
 def contact_point_on_edge(i, contact_point):
     r = (bricks[i].y - bricks[i].x).normalized()
     t = R(r) @ (contact_point - bricks[i].x)
-    lam = t[0]/worldl(7)
+    lam = 1 - t[0]/worldl(7)
     edge_point = lam * bricks[i].y + (1-lam) * bricks[i].x
     edge_point += (1 if t[1] > 0 else -1) * Diameter/2 * inv(r)
     return edge_point, lam
 
+@ti.func
+def perpendicular(rm, x):
+    return (rm @ x).y
+
+@ti.func
+def tangent(rm, x):
+    return (rm @ x).x
+
 @ti.kernel
 def project_v(cnt: ti.i32):
     for i in bricks:
-        r = (bricks[i].y - bricks[i].x).normalized()
-        p_vx[i] = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r) * r /2
-        p_vy[i] = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r) * r /2
+        r1 = (bricks[i].y - bricks[i].x).normalized()
+        p_vx[i] = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+        p_vy[i] = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+        # p_vx[j] = q_vx[j] + (q_vy[j] - q_vx[j]).dot(r2) * r2 /2
+        # p_vy[j] = q_vy[j] - (q_vy[j] - q_vx[j]).dot(r2) * r2 /2
         if Diameter/2 > bricks[i].x.y and q_vx[i].y < 0: 
             p_vx[i] += ti.Vector([0., -2 * q_vx[i].y])
         if Diameter/2 > bricks[i].y.y and q_vy[i].y < 0: 
@@ -239,27 +295,69 @@ def project_v(cnt: ti.i32):
 
         for j in range(cnt):
             if j != i and contact(i,j):
+        # for j in range(i):
+        #     if contact(i,j):
+                r = r2 = (bricks[j].y - bricks[j].x).normalized()
                 I, J = j, i
+
                 if contact_ev(i,j):
                     I, J = i, j
+                    r = r1
+
+                rm = R(r)
 
                 t,sign = contact_point_x_or_y(I,J)
                 
                 ep, lam = contact_point_on_edge(I, t)
                 ve_0 = lam * v_y[I] + (1-lam) * v_x[I]
                 vv_0 = v_x[J] if sign else v_y[J]
+                vy2 = v_y[J] if sign else v_x[J]
 
-                ve_0_s = ve_0.dot(inv(r))
-                vv_0_s = vv_0.dot(inv(r))
+                ve_0_s = ve_0.dot(inv(r1))
+                vv_0_s = vv_0.dot(inv(r1))
 
+                # construction matrix
+                # coord = rm @ (bricks[J].y - bricks[J].x) 
+                A = collision_matrix(lam)
+                c1 = perpendicular(rm, v_x[I] + v_y[I] + v_x[J] + v_y[J])
+                c2 = perpendicular(rm, (lam - 1/3) * v_x[I] + (lam-2/3) * v_y[I])
+                c3 = -perpendicular(rm, ve_0 - vv_0)
+                c4 = perpendicular(rm, vv_0 - vy2)
+                # c4 = tangent(rm, -coord.x * vv_0)
+                # c5 = coord.x * perpendicular(rm, vy2) - coord.y * tangent(rm, vy2)
+                b = ti.Vector([c1, c2, c3, c4])
+                # x0 = ti.Vector([perpendicular(rm, v_x[I]), perpendicular(rm, v_y[I]), perpendicular(rm, vy2), perpendicular(rm, vv_0), tangent(rm, vy2)])
+                velocities = A.inverse() @ b
+                # for iter in ti.static(range(4)):
+                #     print(f'v[{iter}] = {velocities[iter]}')
+                # for iter in ti.static(range(4)):
+                #     print(f'b[{iter}] = {b[iter]}')
+                    
+                # velocities = solve_jacobian(A, b, x0)
                 if contact_ev(i,j):
-                    p_vx[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
-                    p_vy[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
-                    # FIXME: add rotation
-                elif sign:   # contact on x
-                    p_vx[i] += (ve_0_s * 2 - vv_0_s) * inv(r) / 2 
-                else: # contact on y
-                    p_vy[i] += (ve_0_s * 2 - vv_0_s) * inv(r) / 2
+                    p_vx[i] += inv(r) * velocities[0] + r * tangent(rm, v_x[i])
+                    p_vy[i] += inv(r) * velocities[1] + r * tangent(rm, v_y[i])
+                else: 
+                    if sign:
+                        p_vx[i] += inv(r) * velocities[2] + r * tangent(rm, v_x[i])
+                        p_vy[i] += inv(r) * velocities[3] + r * tangent(rm, v_y[i])
+                    else :
+                        p_vy[i] += inv(r) * velocities[2] + r * tangent(rm, v_y[i])
+                        p_vx[i] += inv(r) * velocities[3] + r * tangent(rm, v_x[i])
+
+
+                # # p_vx[i] += v_x[i]
+                # # p_vy[i] += v_y[i]
+                # if contact_ev(i,j):
+                #     p_vx[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
+                #     p_vy[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
+                #     # FIXME: add rotation
+                #     # p_vx[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
+                #     # p_vy[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
+                # elif sign:   # contact on x
+                #     p_vx[i] += (ve_0_s * 2 - vv_0_s) * inv(r) / 2
+                # else: # contact on y
+                #     p_vy[i] += (ve_0_s * 2 - vv_0_s) * inv(r) / 2
 
 @ti.kernel
 def global_v(cnt: ti.i32):
@@ -340,18 +438,18 @@ def probe_grid_sdf(cnt):
 # window = ti.ui.Window('Implicit Mass Spring System', res=(500, 500))
 gui = ti.GUI("Vector Field", res=(res, res))
         
-init()
+cnt = init()
 _grid, _grad = probe_grid_sdf(0)
-cnt = 0
 mxy = np.zeros((2,2),dtype = np.float32)
 mcnt = 0
 normalize = lambda x: x/np.linalg.norm(x)
 t3 = False
-gravity = False
+gravity = True
+to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
+
 while gui.running:
     
-    to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
-    l,x,y,r = [to_np(i,cnt-mcnt) for i in ['l','x','y','r']]
+    l,x,y = [to_np(i,cnt-mcnt) for i in ['l','x','y']]
     if len(l):
         gui.lines(x, y, color = 0x888888, radius = radius)
         gui.circles(np.vstack([x, y]), radius = Radius, color = 0x0)
@@ -381,8 +479,7 @@ while gui.running:
             if mcnt:
                 bricks[cnt] = ti.Struct({
                     'x': ti.Vector(mxy), # center
-                    'y': ti.Vector([0.,0.]), # center
-                    'r': ti.Vector([1., 0.]), # rotation in complex number
+                    'y': ti.Vector(mxy), # center
                     'l': 7,  # length
                 })
             elif not (t3 and not allow_cross):
@@ -402,7 +499,7 @@ while gui.running:
         t3 = check_fenwick(cnt, cnt)
         
         color = 0x880000 if t3 else 0x440000 if t1 or t2 else 0x444444 
-        r,l,x,y = bricks[cnt].r, bricks[cnt].l, bricks[cnt].x, bricks[cnt].y
+        l,x,y = bricks[cnt].l, bricks[cnt].x, bricks[cnt].y
         gui.line(x, y, color = color, radius = radius)
         gui.circle(x, color = 0x0, radius = Radius)
     gui.show()
