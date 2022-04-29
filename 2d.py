@@ -1,4 +1,3 @@
-from attr import get_run_validators
 import taichi as ti
 import numpy as np 
 # (x|y|r)\[(.)\]    bricks[$2].$1
@@ -15,7 +14,7 @@ zero = -1e-9
 Diameter = diameter / res
 worldl = lambda l: (l-1) * Diameter
 n_jacobian_iters = 100
-n2_jacobian_iters = 10
+n2_jacobian_iters = 1
 dt = 5e-4
 debug = False
 allow_cross = False
@@ -80,11 +79,21 @@ def init() -> ti.i32:
         probes[I] = (I + 0.5) / grid
     x = ti.Vector([0.2, 0.05])
     y = x + ti.Vector([1., 0.]) * worldl(7)
-    x2 = ti.Vector([0.2 + worldl(7)/2, 0.2])
-    y2 = x2 + ti.Vector([1., 1.]).normalized() * worldl(7)
+    # x2 = ti.Vector([0.2 + worldl(7)/2, 0.2])
+    x2 = ti.Vector([0.1, 0.5])
+    # y2 = x2 + ti.Vector([1., 1.]).normalized() * worldl(7)
+    y2 = x2 + ey * worldl(7)
+    x3 = ti.Vector([0.5, (y2 + x2).y/2.])
+    # y3 = x3 + ti.Vector([-1., 1.]).normalized() * worldl(7)
+    y3 = x3 + ti.Vector([1., -0.5]).normalized() * worldl(7)
+    # bricks[0] = ti.Struct({
+    #     'x': x, 
+    #     'y': y,
+    #     'l': 7,  # length
+    # })
     bricks[0] = ti.Struct({
-        'x': x, 
-        'y': y,
+        'x': x3, 
+        'y': y3,
         'l': 7,  # length
     })
     bricks[1] = ti.Struct({
@@ -92,6 +101,9 @@ def init() -> ti.i32:
         'y': y2,
         'l': 7,  # length
     })
+    v_x[0] = v_y[0] = -ex * 5
+    v_x[1] = v_y[1] = ex * 5
+
     return 2
 
 @ti.kernel
@@ -275,7 +287,7 @@ def contact_point_on_edge2(i, contact_point):
 @ti.func
 def contact_point_on_edge(i, contact_point):                
     # contact point =  lam * x + (1 - lam) * y
-    lam = 1 - (contact_point - bricks[i].x).dot(bricks[i].y - bricks[i].x)/worldl(7)
+    lam = 1. - (contact_point - bricks[i].x).dot((bricks[i].y - bricks[i].x).normalized())/worldl(7)
     return max(min(lam , 1.), 0.)
     
 @ti.func
@@ -292,26 +304,27 @@ def cross_2d(n, r):
 
 @ti.func
 def boundary_down(sin_theta, n1, x, q_v, center):
-    impact = 0
+    impact = 0.
     if Diameter/2 > x.y and q_v.y < 0: 
         ra = ti.Vector([x.x, 0.0]) - center
-        impact = ti.abs(2 * q_v.y / (1 + 12 / worldl(7) ** 2 * cross_2d(ey, ra)))
+        impact = ti.abs(1 * q_v.y / (1 + 12 / worldl(7) ** 2 * cross_2d(ey, ra)))
         # p_vx[i] += impact * (ey + sin_theta * 6 * n1)
         # p_vy[i] += impact * (ey - sin_theta * 6 * n1)
-        # print(impact)
+        # print('boundary',impact)
     return impact * (ey + sin_theta * 6 * n1), impact * (ey - sin_theta * 6 * n1)
 
 @ti.kernel
 def project_v(cnt: ti.i32):
     for i in bricks:
         r1 = (bricks[i].y - bricks[i].x).normalized()
-        p_vx[i] = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
-        p_vy[i] = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+        px0 = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+        py0 = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+        p_vx[i], p_vy[i] = px0, py0
+
         # p_vx[j] = q_vx[j] + (q_vy[j] - q_vx[j]).dot(r2) * r2 /2
         # p_vy[j] = q_vy[j] - (q_vy[j] - q_vx[j]).dot(r2) * r2 /2
         n1 = inv(r1)
         n1 *= 1 if n1.y > 0 else -1
-        ey = ti.Vector([0.,1.])
         sin_theta = ti.abs(r1.x / 2)
         center = (bricks[i].x + bricks[i].y) / 2
         p1, p2 = boundary_down(sin_theta, n1, bricks[i].x, q_vx[i], center)
@@ -334,62 +347,18 @@ def project_v(cnt: ti.i32):
         #     print(impact)
 
         for j in range(cnt):
-            if j != i and contact(i,j):
+            b1, b2 = contact_ev(i, j), contact_ev(j, i)
+            if j != i and (b1 or b2):
         # for j in range(i):
         #     if contact(i,j):
-                # r = r2 = (bricks[j].y - bricks[j].x).normalized()
-                # I, J = j, i
-
-                # if contact_ev(i,j):
-                #     I, J = i, j
-                #     r = r1
-
-                # rm = R(r)
-
-                # t,sign = contact_point_x_or_y(I,J)
-                
-                # ep, lam = contact_point_on_edge(I, t)
-                # ve_0 = lam * v_y[I] + (1-lam) * v_x[I]
-                # vv_0 = v_x[J] if sign else v_y[J]
-                # vy2 = v_y[J] if sign else v_x[J]
-
-                # ve_0_s = ve_0.dot(inv(r))
-                # vv_0_s = vv_0.dot(inv(r))
-
-                # # construction matrix
-                # # coord = rm @ (bricks[J].y - bricks[J].x) 
-                # A = collision_matrix(lam)
-                # c1 = perpendicular(rm, v_x[I] + v_y[I] + v_x[J] + v_y[J])
-                # c2 = perpendicular(rm, (lam - 1/3) * v_x[I] + (lam-2/3) * v_y[I])
-                # c3 = -perpendicular(rm, ve_0 - vv_0)
-                # c4 = perpendicular(rm, vv_0 - vy2)
-                # # c4 = tangent(rm, -coord.x * vv_0)
-                # # c5 = coord.x * perpendicular(rm, vy2) - coord.y * tangent(rm, vy2)
-                # b = ti.Vector([c1, c2, c3, c4])
-                # # x0 = ti.Vector([perpendicular(rm, v_x[I]), perpendicular(rm, v_y[I]), perpendicular(rm, vy2), perpendicular(rm, vv_0), tangent(rm, vy2)])
-                # velocities = A.inverse() @ b
-                # # for iter in ti.static(range(4)):
-                # #     print(f'v[{iter}] = {velocities[iter]}')
-                # # for iter in ti.static(range(4)):
-                # #     print(f'b[{iter}] = {b[iter]}')
-                    
-                # # velocities = solve_jacobian(A, b, x0)
-                # if contact_ev(i,j):
-                #     p_vx[i] += inv(r) * velocities[0] + r * tangent(rm, v_x[i])
-                #     p_vy[i] += inv(r) * velocities[1] + r * tangent(rm, v_y[i])
-                # else: 
-                #     if sign:
-                #         p_vx[i] += inv(r) * velocities[2] + r * tangent(rm, v_x[i])
-                #         p_vy[i] += inv(r) * velocities[3] + r * tangent(rm, v_y[i])
-                #     else :
-                #         p_vy[i] += inv(r) * velocities[2] + r * tangent(rm, v_y[i])
-                #         p_vx[i] += inv(r) * velocities[3] + r * tangent(rm, v_x[i])
-
                 # default contact_ev, on x
                 I, J = i, j 
-                if not contact_ev(i,j): 
+
+                if b2 and not b1: 
                     I, J = j, i
-                    
+                elif b2 and b1 and j < i:   # avoid handling twice
+                    I, J = j, i
+
                 t, sign = contact_point_x_or_y(I,J)                
                 lam = contact_point_on_edge(I, t)
                 r = (bricks[I].y - bricks[I].x).normalized()
@@ -397,58 +366,57 @@ def project_v(cnt: ti.i32):
                 n *= (1 if n.dot(bricks[J].x - bricks[I].x) > 0 else -1)
                 nl = n
                 pa = lam * bricks[I].x + (1-lam) * bricks[I].y
-                if lam == 0. or lam == 1.:
-                    n = (t - pa).normalized()
                 rb1 = bricks[J].x if sign else bricks[J].y
                 rbc = (bricks[J].x + bricks[J].y) /2
                 rb2 = rbc * 2 - rb1
                 rac = (bricks[I].x + bricks[I].y) /2
+                ve_0 = lam * v_x[I] + (1 - lam) * v_y[I]
+                vv_0 = v_x[J] if sign else v_y[J]
+                # FIXME: choice of v_x and q_vx
 
-                ve_0 = lam * v_x[I] + (1 - lam) * q_vy[I]
-                vv_0 = v_x[I] if sign else q_vy[I]
-                v_minus = n.dot(ve_0 - vv_0)
+                # if lam == 0. or lam == 1.:
+                if b1 and b2:
+                    # handle point-point contact
+                    n = (t - pa).normalized()
+
+                v_minus = max(n.dot(ve_0 - vv_0), 0)
+                # no need to re-adjust v_minus for point-point contact
                 
                 ra, rb = pa - rac + n * Diameter/2, -n * Diameter/2 + rb1 - rbc
-                impact = ti.abs(-2 * v_minus / (2 + 12 / worldl(7) ** 2 * (cross_2d(n, ra) + cross_2d(n, rb))))
+                impact = ti.abs(2 * v_minus / (2 + 12 / worldl(7) ** 2 * (cross_2d(n, ra) + cross_2d(n, rb))))
+                if ti.static(debug) and impact > 0.02:
+                    print(f'v- = {v_minus}, impact = {impact}, lam = {lam}, {sign}')
                 sin_theta = ti.abs(((rb1 - rbc) / worldl(7)).dot(r))
                 n2 = inv((rb1 - rbc).normalized())
                 n2 *= 1 if n2.dot(n) > 0 else -1
 
-                p_vx[i] += q_vx[i]
-                p_vy[i] += q_vy[i]
-                if contact_ev(i,j):
-                    p_vx[i] += impact * -n
-                    p_vy[i] += impact * -n
-                    
-                    # FIXME: point-point contact
-                    p_vx[i] += impact * (lam - 0.5) * 6 * nl
-                    p_vy[i] -= impact * (lam - 0.5) * 6 * nl
+                # px = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+                # py = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+                # px = px0
+                # py = py0
+                px = py = ti.Vector.zero(float, 2)
+                if (b1 and not b2) or (b1 and b2 and i < j):
+                    px += impact * (-n + (lam - 0.5) * 6 * nl)
+                    py += impact * (-n - (lam - 0.5) * 6 * nl)
+                elif (b2 and not b1) or (b1 and b2 and i > j):
+                    if sign:
+                        px += impact * (n + sin_theta * 6 * n2)
+                        py += impact * (n - sin_theta * 6 * n2)
+                    else :
+                        px += impact * (n - sin_theta * 6 * n2) 
+                        py += impact * (n + sin_theta * 6 * n2)
 
-                elif sign:
-                    p_vx[i] += impact * (n + sin_theta * 6 * n2)
-                    p_vy[i] += impact * (n - sin_theta * 6 * n2)
-                else :
-                    p_vx[i] += impact * (n - sin_theta * 6 * n2) 
-                    p_vy[i] += impact * (n + sin_theta * 6 * n2)
+                p_vx[i] += px
+                p_vy[i] += py
 
-                # # p_vx[i] += v_x[i]
-                # # p_vy[i] += v_y[i]
-                # if contact_ev(i,j):
-                #     p_vx[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
-                #     p_vy[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
-                #     # FIXME: add rotation
-                #     # p_vx[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
-                #     # p_vy[i] += (vv_0_s * 2 - ve_0_s) * inv(r) / 2
-                # elif sign:   # contact on x
-                #     p_vx[i] += (ve_0_s * 2 - vv_0_s) * inv(r) / 2
-                # else: # contact on y
-                #     p_vy[i] += (ve_0_s * 2 - vv_0_s) * inv(r) / 2
+
 
 @ti.kernel
 def global_v(cnt: ti.i32):
     for i in bricks:
-        q_vx[i] = p_vx[i] / contacts[i]
-        q_vy[i] = p_vy[i] / contacts[i]
+        q_vx[i] = p_vx[i] / max(contacts[i] - 1, 1)
+        q_vy[i] = p_vy[i] / max(contacts[i] - 1, 1)
+
 
 @ti.kernel
 def minimize_global(cnt: ti.i32):
@@ -498,12 +466,13 @@ def check_fenwick(I:ti.i32, cnt: ti.i32) -> ti.i32:
     return ret
 
 @ti.kernel
-def add_gravity():
+def add_gravity(g: ti.i32):
     for i in bricks:
         bricks[i].x += v_x[i] * dt
         bricks[i].y += v_y[i] * dt
-        v_x[i] += dt * ti.Vector([0.0, -500])
-        v_y[i] += dt * ti.Vector([0.0, -500])
+        if g:
+            v_x[i] += dt * ti.Vector([0.0, -500.])
+            v_y[i] += dt * ti.Vector([0.0, -500.])
         
 @ti.kernel
 def update_velocity():
@@ -529,7 +498,8 @@ mxy = np.zeros((2,2),dtype = np.float32)
 mcnt = 0
 normalize = lambda x: x/np.linalg.norm(x)
 t3 = False
-gravity = True
+pause = False
+gravity = False
 to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
 
 while gui.running:
@@ -543,9 +513,9 @@ while gui.running:
     
     gui.circles(_grid, radius=3)
     gui.arrows(_grid, _grad, radius = 1)
-    if gravity:
+    if not pause:
         copy_x_to_s(q_x,q_y)
-        add_gravity()
+        add_gravity(gravity)
         solve_local_global(cnt)
         solve_v(cnt)
         # update_velocity()
@@ -554,8 +524,10 @@ while gui.running:
         print(e.key)
         if e.key == 'r':
             container.deactivate_all()
-            cnt = 0
+            cnt = init()
         elif e.key == 's':
+            pause = not pause
+        elif e.key == 'g':
             gravity = not gravity
         elif e.key == ti.GUI.LMB:
             mxy = np.array(gui.get_cursor_pos(), dtype=np.float32) 
