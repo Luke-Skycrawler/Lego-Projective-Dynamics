@@ -14,7 +14,8 @@ zero = -1e-9
 Diameter = diameter / res
 worldl = lambda l: (l-1) * Diameter
 n_jacobian_iters = 100
-n2_jacobian_iters = 1
+n2_jacobian_iters = 10
+epsilon = 1. + 1.
 dt = 5e-4
 debug = False
 allow_cross = False
@@ -308,7 +309,7 @@ def boundary_down(r1, n1, x, q_v, center):
     sin_theta = ti.abs(r1.x / 2)
     if Diameter/2 > x.y and q_v.y < 0: 
         ra = ti.Vector([x.x, 0.0]) - center
-        impact = ti.abs(1 * q_v.y / (1 + 12 / worldl(7) ** 2 * cross_2d(ey, ra)))
+        impact = ti.abs(epsilon * q_v.y / (1 + 12 / worldl(7) ** 2 * cross_2d(ey, ra)))
     return impact * (ey + sin_theta * 6 * n1), impact * (ey - sin_theta * 6 * n1)
     
 @ti.func
@@ -317,7 +318,7 @@ def boundary_left(r1, n1, x, q_v, center):
     sin_theta = ti.abs(r1.y / 2)
     if Diameter/2 > x.x and q_v.x < 0: 
         ra = ti.Vector([0.0, x.y]) - center
-        impact = ti.abs(1. * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(ex, ra)))
+        impact = ti.abs(epsilon * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(ex, ra)))
     return impact * (ex + sin_theta * 6 * n1), impact * (ex - sin_theta * 6 * n1)
 
 @ti.func
@@ -326,7 +327,7 @@ def boundary_right(r1, n1, x, q_v, center):
     sin_theta = ti.abs(r1.y / 2)
     if Diameter/2 > 1.0 - x.x and q_v.x > 0: 
         ra = ti.Vector([1.0, x.y]) - center
-        impact = ti.abs(1. * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(-ex, ra)))
+        impact = ti.abs(epsilon * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(-ex, ra)))
     return impact * (-ex + sin_theta * 6 * n1), impact * (-ex - sin_theta * 6 * n1)
 
 @ti.kernel
