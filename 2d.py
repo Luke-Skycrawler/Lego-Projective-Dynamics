@@ -303,23 +303,21 @@ def cross_2d(n, r):
     return ti.abs(n.cross(r) * r.norm())
 
 @ti.func
-def boundary_down(sin_theta, n1, x, q_v, center):
+def boundary_down(r1, n1, x, q_v, center):
     impact = 0.
+    sin_theta = ti.abs(r1.x / 2)
     if Diameter/2 > x.y and q_v.y < 0: 
         ra = ti.Vector([x.x, 0.0]) - center
         impact = ti.abs(1 * q_v.y / (1 + 12 / worldl(7) ** 2 * cross_2d(ey, ra)))
-        # p_vx[i] += impact * (ey + sin_theta * 6 * n1)
-        # p_vy[i] += impact * (ey - sin_theta * 6 * n1)
-        # print('boundary',impact)
     return impact * (ey + sin_theta * 6 * n1), impact * (ey - sin_theta * 6 * n1)
-
+    
 @ti.func
 def boundary_left(r1, n1, x, q_v, center):
     impact = 0.
     sin_theta = ti.abs(r1.y / 2)
     if Diameter/2 > x.x and q_v.x < 0: 
         ra = ti.Vector([0.0, x.y]) - center
-        impact = ti.abs(2 * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(ex, ra)))
+        impact = ti.abs(1. * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(ex, ra)))
     return impact * (ex + sin_theta * 6 * n1), impact * (ex - sin_theta * 6 * n1)
 
 @ti.func
@@ -328,7 +326,7 @@ def boundary_right(r1, n1, x, q_v, center):
     sin_theta = ti.abs(r1.y / 2)
     if Diameter/2 > 1.0 - x.x and q_v.x > 0: 
         ra = ti.Vector([1.0, x.y]) - center
-        impact = ti.abs(2 * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(-ex, ra)))
+        impact = ti.abs(1. * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(-ex, ra)))
     return impact * (-ex + sin_theta * 6 * n1), impact * (-ex - sin_theta * 6 * n1)
 
 @ti.kernel
@@ -347,11 +345,10 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
         n3 = -n2
         n1 *= 1 if n1.y > 0 else -1
 
-        sin_theta = ti.abs(r1.x / 2)
         center = (bricks[i].x + bricks[i].y) / 2
 
-        p11, p12 = boundary_down(sin_theta, n1, bricks[i].x, q_vx[i], center)
-        p13, p14 = boundary_down(sin_theta, n1, bricks[i].y, q_vy[i], center)
+        p11, p12 = boundary_down(r1, n1, bricks[i].x, q_vx[i], center)
+        p13, p14 = boundary_down(r1, n1, bricks[i].y, q_vy[i], center)
 
         p11, p12 = boundary_down(r1, n1, bricks[i].x, q_vx[i], center)
         p13, p14 = boundary_down(r1, n1, bricks[i].y, q_vy[i], center)
@@ -492,9 +489,10 @@ def add_gravity(g: ti.i32):
     for i in bricks:
         bricks[i].x += v_x[i] * dt
         bricks[i].y += v_y[i] * dt
-        if g:
-            v_x[i] += dt * ti.Vector([0.0, -500.])
-            v_y[i] += dt * ti.Vector([0.0, -500.])
+        _g = -ey if g == 1 else ex if g == 2 else -ex if g == 3 else ti.Vector.zero(float, 2)
+        v_x[i] += dt * 500. * _g 
+        v_y[i] += dt * 500. * _g
+
         
 @ti.kernel
 def update_velocity():
@@ -512,7 +510,7 @@ def probe_grid_sdf(cnt):
     # print(_grad)
 
 # window = ti.ui.Window('Implicit Mass Spring System', res=(500, 500))
-gui = ti.GUI("Vector Field", res=(res, res))
+gui = ti.GUI("LEGO master breaker", res=(res, res))
         
 cnt = init()
 _grid, _grad = probe_grid_sdf(0)
@@ -544,13 +542,19 @@ while gui.running:
     if gui.get_event(ti.GUI.PRESS):
         e = gui.event
         print(e.key)
-        if e.key == 'r':
+        if e.key == 'r' or e.key =='c':
             container.deactivate_all()
-            cnt = init()
+            cnt = init() if e.key == 'r' else 0
         elif e.key == 's':
             pause = not pause
         elif e.key == 'g':
             gravity = not gravity
+        elif e.key == ti.GUI.LEFT:
+            gravity = 3
+        elif e.key == ti.GUI.RIGHT:
+            gravity = 2
+        elif e.key == ti.GUI.DOWN:
+            gravity = 1
         elif e.key == ti.GUI.LMB:
             mxy = np.array(gui.get_cursor_pos(), dtype=np.float32) 
             mcnt = not mcnt if not (t3 and not allow_cross) else mcnt
