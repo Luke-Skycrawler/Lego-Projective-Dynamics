@@ -14,7 +14,7 @@ zero = -1e-9
 Diameter = diameter / res
 worldl = lambda l: (l-1) * Diameter
 n_jacobian_iters = 100
-n2_jacobian_iters = 10
+n2_jacobian_iters = 1
 epsilon = 1. + 1.
 dt = 5e-4
 debug = False
@@ -75,7 +75,30 @@ def signed_distance(x_j, I):  # I: index of brick; x_j: pos
     return ret
 
 @ti.kernel
-def init() -> ti.i32:
+def init_case_2() -> ti.i32:    # for testing point-point contact
+    for I in ti.grouped(probes):
+        probes[I] = (I + 0.5) / grid
+    x2 = ti.Vector([0.1, 0.2])
+    y2 = x2 + ey * worldl(7)
+    x3 = ti.Vector([0.5, y2.y + Diameter/4])
+    y3 = x3 + ti.Vector([1., -0.5]).normalized() * worldl(7)
+    bricks[0] = ti.Struct({
+        'x': x3, 
+        'y': y3,
+        'l': 7,  # length
+    })
+    bricks[1] = ti.Struct({
+        'x': x2, 
+        'y': y2,
+        'l': 7,  # length
+    })
+    v_x[0] = v_y[0] = -ex * 5
+    v_x[1] = v_y[1] = ex * 5
+
+    return 2
+
+@ti.kernel
+def init_case_1() -> ti.i32:    # for testing regular case
     for I in ti.grouped(probes):
         probes[I] = (I + 0.5) / grid
     x = ti.Vector([0.2, 0.05])
@@ -106,6 +129,7 @@ def init() -> ti.i32:
     v_x[1] = v_y[1] = ex * 5
 
     return 2
+init = init_case_1
 
 @ti.kernel
 def grid_sdf(t: ti.i32):
@@ -402,7 +426,9 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
                 impact = ti.abs(2 * v_minus / (2 + 12 / worldl(7) ** 2 * (cross_2d(n, ra) + cross_2d(n, rb))))
                 if ti.static(debug) and impact > 0.02:
                     print(f'v- = {v_minus}, impact = {impact}, lam = {lam}, {sign}')
-                sin_theta = ti.abs(((rb1 - rbc) / worldl(7)).dot(r))
+                # sin_theta = ti.abs(((rb1 - rbc) / worldl(7)).dot(r)) if not (b1 and b2) else ti.abs(n.cross((rb1 - rbc) / worldl(7)))
+                sin_theta = ti.abs(n.cross(rb1 - rbc)) / worldl(7)
+                sin_theta_2 = ti.abs(n.cross(pa - rac)) / worldl(7)
                 n2 = inv((rb1 - rbc).normalized())
                 n2 *= 1 if n2.dot(n) > 0 else -1
 
@@ -411,9 +437,12 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
                 # px = px0
                 # py = py0
                 px = py = ti.Vector.zero(float, 2)
-                if (b1 and not b2) or (b1 and b2 and i < j):
+                if (b1 and not b2): # or (b1 and b2 and i < j):
                     px += impact * (-n + (lam - 0.5) * 6 * nl)
                     py += impact * (-n - (lam - 0.5) * 6 * nl)
+                elif b1 and b2 and i < j:
+                    px += impact * (-n - sin_theta_2 * 6 * nl)
+                    py += impact * (-n + sin_theta_2 * 6 * nl)
                 elif (b2 and not b1) or (b1 and b2 and i > j):
                     if sign:
                         px += impact * (n + sin_theta * 6 * n2)
