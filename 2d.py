@@ -313,44 +313,62 @@ def boundary_down(sin_theta, n1, x, q_v, center):
         # print('boundary',impact)
     return impact * (ey + sin_theta * 6 * n1), impact * (ey - sin_theta * 6 * n1)
 
+@ti.func
+def boundary_left(r1, n1, x, q_v, center):
+    impact = 0.
+    sin_theta = ti.abs(r1.y / 2)
+    if Diameter/2 > x.x and q_v.x < 0: 
+        ra = ti.Vector([0.0, x.y]) - center
+        impact = ti.abs(2 * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(ex, ra)))
+    return impact * (ex + sin_theta * 6 * n1), impact * (ex - sin_theta * 6 * n1)
+
+@ti.func
+def boundary_right(r1, n1, x, q_v, center):
+    impact = 0.
+    sin_theta = ti.abs(r1.y / 2)
+    if Diameter/2 > 1.0 - x.x and q_v.x > 0: 
+        ra = ti.Vector([1.0, x.y]) - center
+        impact = ti.abs(2 * q_v.x / (1 + 12 / worldl(7) ** 2 * cross_2d(-ex, ra)))
+    return impact * (-ex + sin_theta * 6 * n1), impact * (-ex - sin_theta * 6 * n1)
+
 @ti.kernel
-def project_v(cnt: ti.i32):
+def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.template(), q_vy: ti.template()):
     for i in bricks:
         r1 = (bricks[i].y - bricks[i].x).normalized()
-        px0 = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
-        py0 = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
-        p_vx[i], p_vy[i] = px0, py0
+        # px0 = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+        # py0 = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+        # p_vx[i], p_vy[i] = px0, py0
+        p_vx[i] = p_vy[i] = ti.Vector.zero(float, 2)
 
         # p_vx[j] = q_vx[j] + (q_vy[j] - q_vx[j]).dot(r2) * r2 /2
         # p_vy[j] = q_vy[j] - (q_vy[j] - q_vx[j]).dot(r2) * r2 /2
         n1 = inv(r1)
+        n2 = n1 * (1 if n1.x > 0 else -1)
+        n3 = -n2
         n1 *= 1 if n1.y > 0 else -1
+
         sin_theta = ti.abs(r1.x / 2)
         center = (bricks[i].x + bricks[i].y) / 2
-        p1, p2 = boundary_down(sin_theta, n1, bricks[i].x, q_vx[i], center)
-        p3, p4 = boundary_down(sin_theta, n1, bricks[i].y, q_vy[i], center)
-        p_vx[i] += p1+p4 
-        p_vy[i] += p2+p3
 
-        # boundary conditions
-        # if Diameter/2 > bricks[i].x.y and q_vx[i].y < 0: 
-        #     ra = ti.Vector([bricks[i].x.x, 0.0]) - (bricks[i].x + bricks[i].y) / 2
-        #     impact = ti.abs(2 * q_vx[i].y / (1 + 12 / worldl(7) ** 2 * cross_2d(ey, ra)))
-        #     p_vx[i] += impact * (ey + sin_theta * 6 * n1)
-        #     p_vy[i] += impact * (ey - sin_theta * 6 * n1)
-        #     print(impact)
-        # if Diameter/2 > bricks[i].y.y and q_vy[i].y < 0: 
-        #     ra = ti.Vector([bricks[i].y.x, 0.0]) - (bricks[i].x + bricks[i].y) / 2
-        #     impact = ti.abs(2 * q_vy[i].y / (1 + 12 / worldl(7) ** 2 * cross_2d(ey, ra)))
-        #     p_vx[i] += impact * (ey - sin_theta * 6 * n1)
-        #     p_vy[i] += impact * (ey + sin_theta * 6 * n1)
-        #     print(impact)
+        p11, p12 = boundary_down(sin_theta, n1, bricks[i].x, q_vx[i], center)
+        p13, p14 = boundary_down(sin_theta, n1, bricks[i].y, q_vy[i], center)
+
+        p11, p12 = boundary_down(r1, n1, bricks[i].x, q_vx[i], center)
+        p13, p14 = boundary_down(r1, n1, bricks[i].y, q_vy[i], center)
+
+        p21, p22 = boundary_left(r1, n2, bricks[i].x, q_vx[i], center)
+        p23, p24 = boundary_left(r1, n2, bricks[i].y, q_vy[i], center)
+
+        p31, p32 = boundary_right(r1, n3, bricks[i].x, q_vx[i], center)
+        p33, p34 = boundary_right(r1, n3, bricks[i].y, q_vy[i], center)
+
+        p_vx[i] += p11+p14 + p21+p24 + p31+p34  
+        p_vy[i] += p12+p13 + p22+p23 + p32+p33 
 
         for j in range(cnt):
             b1, b2 = contact_ev(i, j), contact_ev(j, i)
             if j != i and (b1 or b2):
-        # for j in range(i):
-        #     if contact(i,j):
+        
                 # default contact_ev, on x
                 I, J = i, j 
 
@@ -414,8 +432,12 @@ def project_v(cnt: ti.i32):
 @ti.kernel
 def global_v(cnt: ti.i32):
     for i in bricks:
-        q_vx[i] = p_vx[i] / max(contacts[i] - 1, 1)
-        q_vy[i] = p_vy[i] / max(contacts[i] - 1, 1)
+        r1 = (bricks[i].y - bricks[i].x).normalized()
+        px0 = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+        py0 = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
+        # p_vx[i] += px0, p_vy[i] = px0, py0
+        q_vx[i] = p_vx[i] / max(contacts[i] - 1, 1) + px0
+        q_vy[i] = p_vy[i] / max(contacts[i] - 1, 1) + py0
 
 
 @ti.kernel
@@ -446,7 +468,7 @@ def solve_v(cnt):
     q_vx.copy_from(v_x)
     q_vy.copy_from(v_y)
     for i in range(n2_jacobian_iters):
-        project_v(cnt)
+        project_v(cnt, v_x, v_y, q_vx, q_vy)
         global_v(cnt)
     v_x.copy_from(q_vx)
     v_y.copy_from(q_vy)
