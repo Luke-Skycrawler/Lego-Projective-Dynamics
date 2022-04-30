@@ -170,14 +170,17 @@ def interpolate(x, i):
     return bricks[i].x * _lam + bricks[i].y * (1-_lam), _lam
 
 @ti.kernel
-def preview_neighbouring_joint(arr: ti.ext_arr(), ret: ti.ext_arr()):
+def preview_neighbouring_joint(arr: ti.ext_arr(), ret: ti.ext_arr()) -> ti.i32:
     x = ti.Vector([arr[0], arr[1]])
     hole = ti.Vector.zero(float, 2)
+    b = 0
     for i in bricks:
         if signed_distance(x, i) < Diameter /2:
             hole, lam = interpolate(x, i)
             ret[0], ret[1] = i, lam
+            b = 1
     arr[0], arr[1] = hole.x, hole.y
+    return b
 
 @ti.kernel
 def add_joint(cnt: ti.i32, arr: ti.ext_arr()):
@@ -225,7 +228,7 @@ def ev(I:ti.i32):
         t = min(signed_distance(bricks[j].x, I), signed_distance(bricks[j].y, I)) < Diameter
         # TODO: watch out the sdf 
         update_fenwick(t, j,I)
-    
+
 # @ti.kernel
 # def _ee(i: ti.i32):
 #     for j in bricks:
@@ -566,6 +569,18 @@ def probe_grid_sdf(cnt):
     return _grid, _grad
     # print(_grad)
 
+@ti.kernel
+def preview_possible_assemble(m: ti.ext_arr(), ret: ti.ext_arr())->ti.i32:
+    mouse = ti.Vector([m[0], m[1]])
+    b = 0
+    for j in joints:
+        if joints[j].y == -1:
+            x = mingle(joints[j].x, joints_lambda[j].x)
+            if (x-mouse).norm() < Diameter/2:
+                b = 1
+                ret[0], ret[1] = x.x, x.y
+    return b
+
 # window = ti.ui.Window('Implicit Mass Spring System', res=(500, 500))
 gui = ti.GUI("LEGO master breaker", res=(res, res))
         
@@ -583,6 +598,7 @@ BRICKS_MODE = 0
 JOINT_MODE = 1
 mode = BRICKS_MODE
 tmp_joint = np.zeros((2,), dtype = np.float32)
+new_joint_allowed = False
 while gui.running:
     
     l,x,y = [to_np(i,cnt-mcnt) for i in ['l','x','y']]
@@ -634,7 +650,7 @@ while gui.running:
                     _grid, _grad = probe_grid_sdf(cnt)
                     cnt += 1      
                     solve_local_global(cnt)
-            else: # joint mode
+            elif mode == JOINT_MODE and new_joint_allowed: # joint mode
                 add_joint(n_joints, tmp_joint)
                 n_joints += 1
                 # print(n_joints)
@@ -645,19 +661,23 @@ while gui.running:
         if mcnt:
             preview_brick(m-mxy,cnt)
             tmp_dense_matrix.fill(0)
+            # tj = ej(cnt)
+            picked = preview_possible_assemble(m, tmp_joint)
             ev(cnt)
             t1 = check_fenwick(cnt, cnt)
             ve(cnt)
             t2 = check_fenwick(cnt, cnt)
             ee(cnt)
-            t3 = check_fenwick(cnt, cnt)
+            t3 = check_fenwick(cnt, cnt) and not picked
             
-            color = 0x880000 if t3 else 0x440000 if t1 or t2 else 0x444444 
+            color = 0x880000 if t3 else 0x440000 if (t1 or t2 and not picked) else 0x444444 
             l,x,y = bricks[cnt].l, bricks[cnt].x, bricks[cnt].y
             gui.line(x, y, color = color, radius = radius)
             gui.circle(x, color = 0x0, radius = Radius)
+            if picked:
+                gui.circle(tmp_joint, color = 0xffffff, radius = Radius * 0.9)
         else:
-            preview_neighbouring_joint(m, tmp_joint)
+            new_joint_allowed = preview_neighbouring_joint(m, tmp_joint)
             # tmp_joint = m
             gui.circle(m, color = 0xffffff, radius = Radius * 0.8)
         
