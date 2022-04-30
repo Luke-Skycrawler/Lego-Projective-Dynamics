@@ -3,7 +3,7 @@ import numpy as np
 # (x|y|r)\[(.)\]    bricks[$2].$1
 
 dim = 2
-max_bricks = 1000
+max_bricks, max_joints = 1000, 500
 chunk = 1
 res = 512
 grid = 16
@@ -42,6 +42,10 @@ q_x = ti.Vector.field(dim, dtype = float)
 q_y = ti.Vector.field(dim, dtype = float)
 q_vx = ti.Vector.field(dim, dtype = float)
 q_vy = ti.Vector.field(dim, dtype = float)
+joints = ti.Vector.field(2, dtype = ti.i32)
+joints_lambda = ti.Vector.field(2, dtype = float)
+joints_container = ti.root.pointer(ti.i, max_joints)
+joints_container.place(joints, joints_lambda)
 bricks = ti.StructField(linear_dict)
 container = ti.root.pointer(ti.i, max_bricks)
 container.place(bricks)
@@ -137,6 +141,7 @@ def grid_sdf(t: ti.i32):
     for I in ti.grouped(sdf):
         sdf[I] = signed_distance(probes[I], t)
         tot_sdf[None] += sdf[I]
+
 @ti.kernel
 def test_wrapper(cnt: ti.i32):
     for i in ti.grouped(probes):
@@ -152,6 +157,43 @@ def test_wrapper(cnt: ti.i32):
 def preview_brick(arr:ti.ext_arr(), cnt: ti.i32):
     r = ti.Vector([arr[0],arr[1]]).normalized()
     bricks[cnt].y = r * worldl(bricks[cnt].l) + bricks[cnt].x
+
+@ti.func
+def mingle(i, lam):
+    return bricks[i].x * lam + bricks[i].y * (1- lam)
+
+@ti.func
+def interpolate(x, i):
+    n = bricks[i].l - 1.
+    lam = contact_point_on_edge(i, x)
+    _lam = ti.cast(ti.round(lam * n), float) / n
+    return bricks[i].x * _lam + bricks[i].y * (1-_lam), _lam
+
+@ti.kernel
+def preview_neighbouring_joint(arr: ti.ext_arr(), ret: ti.ext_arr()):
+    x = ti.Vector([arr[0], arr[1]])
+    hole = ti.Vector.zero(float, 2)
+    for i in bricks:
+        if signed_distance(x, i) < Diameter /2:
+            hole, lam = interpolate(x, i)
+            ret[0], ret[1] = i, lam
+    arr[0], arr[1] = hole.x, hole.y
+
+@ti.kernel
+def add_joint(cnt: ti.i32, arr: ti.ext_arr()):
+    j = ti.Vector([ti.cast(arr[0], ti.i32), -1])
+    jl = ti.Vector([arr[1], -1.])
+    # joints_pos[cnt] = x
+    joints[cnt], joints_lambda[cnt] = j, jl
+    
+    # joints[cnt] = ti.Vector([i, j])
+    # joints_lambda[cnt] = ti.Vector([l1, l2])
+
+@ti.kernel
+def get_joints_pos(arr: ti.ext_arr()):
+    for j in joints:
+        x = mingle(joints[j].x, joints_lambda[j].x)
+        arr[j, 0], arr[j, 1] = x.x, x.y
 
 @ti.func
 def update_fenwick(boolean, i, j): # collision at point x/y
@@ -237,16 +279,16 @@ def contact_point_x_or_y(I,j):  # return 1 for x 0 for y
     contact_point = bricks[j].x if boolean else bricks[j].y
     return contact_point, boolean
 
-debug_solver = True
-@ti.func
-def solve_jacobian(A, b, x0): # solve x for A x = b
-    T = A - ti.Matrix.identity(float, 5)
-    for iter in range(n2_jacobian_iters):
-        x1 = b - T @ x0
-        if ti.static(debug_solver):
-            print(f'iter {iter}, x1 - x0 = {(x1-x0).norm()}')
-        x0 = x1
-    return x0
+# debug_solver = True
+# @ti.func
+# def solve_jacobian(A, b, x0): # solve x for A x = b
+#     T = A - ti.Matrix.identity(float, 5)
+#     for iter in range(n2_jacobian_iters):
+#         x1 = b - T @ x0
+#         if ti.static(debug_solver):
+#             print(f'iter {iter}, x1 - x0 = {(x1-x0).norm()}')
+#         x0 = x1
+#     return x0
 
 # @ti.func
 # def collision_matrix(lam, coord):
@@ -265,15 +307,16 @@ def solve_jacobian(A, b, x0): # solve x for A x = b
 #         ])
 #     return A
 
-@ti.func
-def collision_matrix(lam):
-    A = ti.Matrix.rows([
-        [1., 1., 1., 1.],
-        [lam - 1/3, lam - 2/3, 0., 0.],
-        [lam, 1-lam, -1., 0.],
-        [0., 0., 1., -1.]
-    ])
-    return A
+# @ti.func
+# def collision_matrix(lam):
+#     A = ti.Matrix.rows([
+#         [1., 1., 1., 1.],
+#         [lam - 1/3, lam - 2/3, 0., 0.],
+#         [lam, 1-lam, -1., 0.],
+#         [0., 0., 1., -1.]
+#     ])
+#     return A
+
 @ti.kernel
 def project_local(cnt: ti.i32):   # local step for all bricks 
 
@@ -300,15 +343,6 @@ def project_local(cnt: ti.i32):   # local step for all bricks
                     p_x[I] += max(-signed_distance(bricks[I].x, j) + Diameter, 0.) * nebla_sdf(bricks[I].x, j).normalized()
                     p_y[I] += max(-signed_distance(bricks[I].y, j) + Diameter, 0.) * nebla_sdf(bricks[I].y, j).normalized()
                 contacts[I] += 1
-
-@ti.func
-def contact_point_on_edge2(i, contact_point):
-    r = (bricks[i].y - bricks[i].x).normalized()
-    t = R(r) @ (contact_point - bricks[i].x)
-    lam = 1 - t[0]/worldl(7)
-    edge_point = lam * bricks[i].y + (1-lam) * bricks[i].x
-    edge_point += (1 if t[1] > 0 else -1) * Diameter/2 * inv(r)
-    return edge_point, lam
 
 @ti.func
 def contact_point_on_edge(i, contact_point):                
@@ -359,13 +393,8 @@ def boundary_right(r1, n1, x, q_v, center):
 def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.template(), q_vy: ti.template()):
     for i in bricks:
         r1 = (bricks[i].y - bricks[i].x).normalized()
-        # px0 = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
-        # py0 = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
-        # p_vx[i], p_vy[i] = px0, py0
         p_vx[i] = p_vy[i] = ti.Vector.zero(float, 2)
 
-        # p_vx[j] = q_vx[j] + (q_vy[j] - q_vx[j]).dot(r2) * r2 /2
-        # p_vy[j] = q_vy[j] - (q_vy[j] - q_vx[j]).dot(r2) * r2 /2
         n1 = inv(r1)
         n2 = n1 * (1 if n1.x > 0 else -1)
         n3 = -n2
@@ -434,10 +463,6 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
                 n2 = inv((rb1 - rbc).normalized())
                 n2 *= 1 if n2.dot(n) > 0 else -1
 
-                # px = q_vx[i] + (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
-                # py = q_vy[i] - (q_vy[i] - q_vx[i]).dot(r1) * r1 /2
-                # px = px0
-                # py = py0
                 px = py = ti.Vector.zero(float, 2)
                 if (b1 and not b2): # or (b1 and b2 and i < j):
                     px += impact * (-n - (lam - 0.5) * 6 * nl)
@@ -545,6 +570,7 @@ def probe_grid_sdf(cnt):
 gui = ti.GUI("LEGO master breaker", res=(res, res))
         
 cnt = init()
+n_joints = 0
 _grid, _grad = probe_grid_sdf(0)
 mxy = np.zeros((2,2),dtype = np.float32)
 mcnt = 0
@@ -553,7 +579,10 @@ t3 = False
 pause = False
 gravity = False
 to_np = lambda x,y: bricks.get_member_field(x).to_numpy()[:y+1]
-
+BRICKS_MODE = 0
+JOINT_MODE = 1
+mode = BRICKS_MODE
+tmp_joint = np.zeros((2,), dtype = np.float32)
 while gui.running:
     
     l,x,y = [to_np(i,cnt-mcnt) for i in ['l','x','y']]
@@ -577,6 +606,7 @@ while gui.running:
         if e.key == 'r' or e.key =='c':
             container.deactivate_all()
             cnt = init() if e.key == 'r' else 0
+            n_joints = 0
         elif e.key == 's':
             pause = not pause
         elif e.key == 'g':
@@ -587,36 +617,54 @@ while gui.running:
             gravity = 2
         elif e.key == ti.GUI.DOWN:
             gravity = 1
+        elif e.key == 'f':
+            mode = not mode
         elif e.key == ti.GUI.LMB:
             mxy = np.array(gui.get_cursor_pos(), dtype=np.float32) 
-            mcnt = not mcnt if not (t3 and not allow_cross) else mcnt
-            print(mxy, mcnt,cnt)
-            if mcnt:
-                bricks[cnt] = ti.Struct({
-                    'x': ti.Vector(mxy), # center
-                    'y': ti.Vector(mxy), # center
-                    'l': 7,  # length
-                })
-            elif not (t3 and not allow_cross):
-                _grid, _grad = probe_grid_sdf(cnt)
-                cnt += 1      
-                solve_local_global(cnt)
+            if mode == BRICKS_MODE:    
+                mcnt = not mcnt if not (t3 and not allow_cross) else mcnt
+                print(mxy, mcnt,cnt)
+                if mcnt:
+                    bricks[cnt] = ti.Struct({
+                        'x': ti.Vector(mxy), # center
+                        'y': ti.Vector(mxy), # center
+                        'l': 7,  # length
+                    })
+                elif not (t3 and not allow_cross):
+                    _grid, _grad = probe_grid_sdf(cnt)
+                    cnt += 1      
+                    solve_local_global(cnt)
+            else: # joint mode
+                add_joint(n_joints, tmp_joint)
+                n_joints += 1
+                # print(n_joints)
+                # print(joints.to_numpy()[:n_joints], joints_lambda.to_numpy()[:n_joints])
                 
-    elif mcnt :
+    elif mcnt or mode == JOINT_MODE:
         m = np.array(gui.get_cursor_pos())
-        preview_brick(m-mxy,cnt)
-        tmp_dense_matrix.fill(0)
-        ev(cnt)
-        t1 = check_fenwick(cnt, cnt)
-        ve(cnt)
-        t2 = check_fenwick(cnt, cnt)
-        ee(cnt)
-        t3 = check_fenwick(cnt, cnt)
+        if mcnt:
+            preview_brick(m-mxy,cnt)
+            tmp_dense_matrix.fill(0)
+            ev(cnt)
+            t1 = check_fenwick(cnt, cnt)
+            ve(cnt)
+            t2 = check_fenwick(cnt, cnt)
+            ee(cnt)
+            t3 = check_fenwick(cnt, cnt)
+            
+            color = 0x880000 if t3 else 0x440000 if t1 or t2 else 0x444444 
+            l,x,y = bricks[cnt].l, bricks[cnt].x, bricks[cnt].y
+            gui.line(x, y, color = color, radius = radius)
+            gui.circle(x, color = 0x0, radius = Radius)
+        else:
+            preview_neighbouring_joint(m, tmp_joint)
+            # tmp_joint = m
+            gui.circle(m, color = 0xffffff, radius = Radius * 0.8)
         
-        color = 0x880000 if t3 else 0x440000 if t1 or t2 else 0x444444 
-        l,x,y = bricks[cnt].l, bricks[cnt].x, bricks[cnt].y
-        gui.line(x, y, color = color, radius = radius)
-        gui.circle(x, color = 0x0, radius = Radius)
+    if n_joints > 0:
+        jx = np.zeros((n_joints, 2), np.float32)
+        get_joints_pos(jx)
+        gui.circles(jx, color = 0xffffff, radius = Radius * 0.8)
     gui.show()
 
 # while window.running:

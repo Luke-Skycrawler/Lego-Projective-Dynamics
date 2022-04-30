@@ -2,4 +2,4 @@ Don't forget to turn it off in a short while! This program is very **MEMORY-CONS
 
 ![](assets/demo.gif)
 
-Don't be fooled by this shitty demo. I don't normally trust it to work.
+And don't be fooled by this shitty demo. I don't normally trust it to work.
