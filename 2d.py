@@ -18,6 +18,7 @@ n2_jacobian_iters = 1
 epsilon = 1. + 1.
 dt = 5e-4
 debug = False
+debug_v = False
 allow_cross = False
 flight = 5e-3
 ti.init(arch=ti.x64)
@@ -129,7 +130,7 @@ def init_case_1() -> ti.i32:    # for testing regular case
     v_x[1] = v_y[1] = ex * 5
 
     return 2
-init = init_case_1
+init = init_case_2
 
 @ti.kernel
 def grid_sdf(t: ti.i32):
@@ -398,6 +399,7 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
                     I, J = j, i
                 elif b2 and b1 and j < i:   # avoid handling twice
                     I, J = j, i
+                    # so far I < J or J point-contact on I's edge
 
                 t, sign = contact_point_x_or_y(I,J)                
                 lam = contact_point_on_edge(I, t)
@@ -424,7 +426,7 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
                 
                 ra, rb = pa - rac + n * Diameter/2, -n * Diameter/2 + rb1 - rbc
                 impact = ti.abs(2 * v_minus / (2 + 12 / worldl(7) ** 2 * (cross_2d(n, ra) + cross_2d(n, rb))))
-                if ti.static(debug) and impact > 0.02:
+                if ti.static(debug_v) and impact > 0.02:
                     print(f'v- = {v_minus}, impact = {impact}, lam = {lam}, {sign}')
                 # sin_theta = ti.abs(((rb1 - rbc) / worldl(7)).dot(r)) if not (b1 and b2) else ti.abs(n.cross((rb1 - rbc) / worldl(7)))
                 sin_theta = ti.abs(n.cross(rb1 - rbc)) / worldl(7)
@@ -438,8 +440,8 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
                 # py = py0
                 px = py = ti.Vector.zero(float, 2)
                 if (b1 and not b2): # or (b1 and b2 and i < j):
-                    px += impact * (-n + (lam - 0.5) * 6 * nl)
-                    py += impact * (-n - (lam - 0.5) * 6 * nl)
+                    px += impact * (-n - (lam - 0.5) * 6 * nl)
+                    py += impact * (-n + (lam - 0.5) * 6 * nl)
                 elif b1 and b2 and i < j:
                     px += impact * (-n - sin_theta_2 * 6 * nl)
                     py += impact * (-n + sin_theta_2 * 6 * nl)
