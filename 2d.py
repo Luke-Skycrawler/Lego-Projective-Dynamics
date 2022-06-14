@@ -44,16 +44,20 @@ q_vx = ti.Vector.field(dim, dtype = float)
 q_vy = ti.Vector.field(dim, dtype = float)
 joints = ti.Vector.field(2, dtype = ti.i32)
 joints_lambda = ti.Vector.field(2, dtype = float)
-joints_container = ti.root.pointer(ti.i, max_joints)
+joints_container = ti.root.pointer(ti.i, 10).pointer(ti.i, 10).pointer(ti.i, max_joints // 100)
 joints_container.place(joints, joints_lambda)
 bricks = ti.StructField(linear_dict)
-container = ti.root.pointer(ti.i, max_bricks)
+container = ti.root.pointer(ti.i, 10).pointer(ti.i, 10).pointer(ti.i, max_joints // 100)
 container.place(bricks)
 container.place(p_x, p_y,p_vx, p_vy, s_x, s_y, v_x, v_y, q_x, q_y, q_vx, q_vy, contacts)
 probes = ti.Vector.field(2, float, (grid,grid))
 sdf = ti.field(float, (grid, grid))
 tot_sdf = ti.field(float, ())
 tmp_dense_matrix = ti.field(ti.u8, (100,100))
+# temporary joint info 
+joints_preview_info = ti.Vector.field(2, dtype = ti.i32, shape = ())
+completed_joint_number = ti.field(dtype = ti.i32, shape = ())
+lambda_preview_info = ti.Vector.field(2, dtype = float, shape = ())
 
 
 ti.root.lazy_grad()
@@ -245,16 +249,21 @@ def ev(I:ti.i32):
 #     for j in bricks:
 #         tot_sdf[None] += signed_distance(bricks[j].x, I) + signed_distance(bricks[j].y, I)
 
+@ti.func
+def _ee(i, j):
+    r1 = bricks[i].y - bricks[i].x
+    r2 = bricks[j].y - bricks[j].x
+    m11 = ti.Matrix.cols([bricks[j].x-bricks[i].x, r1])
+    m12 = ti.Matrix.cols([bricks[j].y-bricks[i].y, r1])
+    m21 = ti.Matrix.cols([bricks[j].x-bricks[i].x, r2])
+    m22 = ti.Matrix.cols([bricks[j].y-bricks[i].y, r2])
+    t = m11.determinant() * m12.determinant() < 0 and m21.determinant() * m22.determinant() < 0
+    return t
+
 @ti.kernel
 def ee(i:ti.i32):
     for j in bricks:
-        r1 = bricks[i].y - bricks[i].x
-        r2 = bricks[j].y - bricks[j].x
-        m11 = ti.Matrix.cols([bricks[j].x-bricks[i].x, r1])
-        m12 = ti.Matrix.cols([bricks[j].y-bricks[i].y, r1])
-        m21 = ti.Matrix.cols([bricks[j].x-bricks[i].x, r2])
-        m22 = ti.Matrix.cols([bricks[j].y-bricks[i].y, r2])
-        t = m11.determinant() * m12.determinant() < 0 and m21.determinant() * m22.determinant() < 0
+        t = _ee(i, j)
         update_fenwick(t, i, j)
 
 @ti.func
@@ -348,6 +357,35 @@ def project_local(cnt: ti.i32):   # local step for all bricks
                 contacts[I] += 1
 
 @ti.func
+def jointed(b1, b2):
+    ret = 0
+    for j in range(n_joints):   # avoid using struct-for in func
+        I, J = joints[j].x, joints[j].y 
+        if (I == b1 and J == b2) or (I == b2 and J == b1):
+            ret += 1
+    return ret
+
+@ti.kernel
+def complete_joint():
+    j = completed_joint_number[None]
+    joints[j] = joints_preview_info[None]
+    joints_lambda[j] = lambda_preview_info[None]
+
+@ti.kernel
+def solve_joints():
+    for j in joints:
+        if joints[j].y != -1:
+            i1, i2 = joints[j].x, joints[j].y
+            x1 = mingle(i1, joints_lambda[j].x)
+            x2 = mingle(i2, joints_lambda[j].y)
+            p_x[i1] += x2 - x1
+            p_y[i1] += x2 - x1
+            p_x[i2] += x1 - x2
+            p_y[i2] += x1 - x2
+            contacts[i1] += 1
+            contacts[i2] += 1
+
+@ti.func
 def contact_point_on_edge(i, contact_point):                
     # contact point =  lam * x + (1 - lam) * y
     lam = 1. - (contact_point - bricks[i].x).dot((bricks[i].y - bricks[i].x).normalized())/worldl(7)
@@ -421,7 +459,7 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
         p_vy[i] += p12+p13 + p22+p23 + p32+p33 
 
         for j in range(cnt):
-            b1, b2 = contact_ev(i, j), contact_ev(j, i)
+            b1, b2, b3 = contact_ev(i, j), contact_ev(j, i), jointed(i, j)
             if j != i and (b1 or b2):
         
                 # default contact_ev, on x
@@ -519,6 +557,7 @@ def solve_local_global(cnt):
         if debug:
             print(f'iter{i}')
         project_local(cnt)
+        solve_joints()
         minimize_global(cnt)
 
 def solve_v(cnt):
@@ -570,15 +609,36 @@ def probe_grid_sdf(cnt):
     # print(_grad)
 
 @ti.kernel
-def preview_possible_assemble(m: ti.ext_arr(), ret: ti.ext_arr())->ti.i32:
+def preview_possible_assemble(m: ti.ext_arr(), mxy: ti.ext_arr(), ret: ti.ext_arr(), cnt: ti.i32)->ti.i32:
     mouse = ti.Vector([m[0], m[1]])
+    bx = ti.Vector([mxy[0], mxy[1]])
     b = 0
     for j in joints:
-        if joints[j].y == -1:
+        if joints[j].y == -1 and b == 0:
             x = mingle(joints[j].x, joints_lambda[j].x)
             if (x-mouse).norm() < Diameter/2:
-                b = 1
+                b += 1
                 ret[0], ret[1] = x.x, x.y
+
+
+                r = (x - bx).normalized()
+                bricks[cnt].y = r * worldl(bricks[cnt].l) + bricks[cnt].x
+
+                completed_joint_number[None] = j
+                joints_preview_info[None] = joints[j]
+                lambda_preview_info[None] = joints_lambda[j]
+
+
+                joints_preview_info[None].y = cnt
+                hole, lam = interpolate(x, cnt)
+                lambda_preview_info[None].y = lam
+                ''' FIXME: 
+                1. adjust position along the brick; 
+                2. if e-v contact after the move, warning color
+                3. invalidate e-e contact with other bricks
+                4. global solve after confirming the assemble
+
+                '''
     return b
 
 # window = ti.ui.Window('Implicit Mass Spring System', res=(500, 500))
@@ -647,6 +707,8 @@ while gui.running:
                         'l': 7,  # length
                     })
                 elif not (t3 and not allow_cross):
+                    if picked:
+                        complete_joint()
                     _grid, _grad = probe_grid_sdf(cnt)
                     cnt += 1      
                     solve_local_global(cnt)
@@ -662,7 +724,7 @@ while gui.running:
             preview_brick(m-mxy,cnt)
             tmp_dense_matrix.fill(0)
             # tj = ej(cnt)
-            picked = preview_possible_assemble(m, tmp_joint)
+            picked = preview_possible_assemble(m, mxy, tmp_joint, cnt)
             ev(cnt)
             t1 = check_fenwick(cnt, cnt)
             ve(cnt)
