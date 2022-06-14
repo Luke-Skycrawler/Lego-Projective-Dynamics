@@ -84,6 +84,33 @@ def signed_distance(x_j, I):  # I: index of brick; x_j: pos
     return ret
 
 @ti.kernel
+def init_case_3() -> ti.i32:    # for testing joints
+    for I in ti.grouped(probes):
+        probes[I] = (I + 0.5) / grid
+    x2 = ti.Vector([0.1, 0.2])
+    y2 = x2 + ey * worldl(7)
+    
+    x3 = x2 + ey * worldl(5)
+    y3 = x3 + ex * worldl(7)
+    bricks[0] = ti.Struct({
+        'x': x2, 
+        'y': y2,
+        'l': 7,  # length
+    })
+    bricks[1] = ti.Struct({
+        'x': x3, 
+        'y': y3,
+        'l': 7,  # length
+    })
+    joints[0] = ti.Vector([0, 1])
+    joints_lambda[0] = ti.Vector([1/3, 1.0])
+    # print(f'jointed(0,1) = {jointed(0,1)}')
+    v_x[0] = v_y[0] = -ey * 5
+    v_x[1] = v_y[1] = -ey * 5
+    return 2
+
+        
+@ti.kernel
 def init_case_2() -> ti.i32:    # for testing point-point contact
     for I in ti.grouped(probes):
         probes[I] = (I + 0.5) / grid
@@ -138,7 +165,6 @@ def init_case_1() -> ti.i32:    # for testing regular case
     v_x[1] = v_y[1] = ex * 5
 
     return 2
-init = init_case_2
 
 @ti.kernel
 def grid_sdf(t: ti.i32):
@@ -291,44 +317,6 @@ def contact_point_x_or_y(I,j):  # return 1 for x 0 for y
     contact_point = bricks[j].x if boolean else bricks[j].y
     return contact_point, boolean
 
-# debug_solver = True
-# @ti.func
-# def solve_jacobian(A, b, x0): # solve x for A x = b
-#     T = A - ti.Matrix.identity(float, 5)
-#     for iter in range(n2_jacobian_iters):
-#         x1 = b - T @ x0
-#         if ti.static(debug_solver):
-#             print(f'iter {iter}, x1 - x0 = {(x1-x0).norm()}')
-#         x0 = x1
-#     return x0
-
-# @ti.func
-# def collision_matrix(lam, coord):
-#     a21 = (lam - 0.5) / 2 - 1/12
-#     a22 = (lam - 0.5) / 2 + 1/12
-
-#     x, y = coord.x, coord.y
-#     a43, a44, a45 = y, y, x
-#     a54, a55 = x, -y
-#     A = ti.Matrix.rows(
-#         [[1., 1., 1., 1., 0.],
-#          [a21, a22, 0., 0., 0.],
-#          [lam, 1-lam, -1, 0., 0.],
-#          [0., 0., a43, a44, a45],
-#          [0., 0., 0., a54, a55]
-#         ])
-#     return A
-
-# @ti.func
-# def collision_matrix(lam):
-#     A = ti.Matrix.rows([
-#         [1., 1., 1., 1.],
-#         [lam - 1/3, lam - 2/3, 0., 0.],
-#         [lam, 1-lam, -1., 0.],
-#         [0., 0., 1., -1.]
-#     ])
-#     return A
-
 @ti.kernel
 def project_local(cnt: ti.i32):   # local step for all bricks 
 
@@ -346,7 +334,7 @@ def project_local(cnt: ti.i32):   # local step for all bricks
         p_y[I].x -= max(Diameter /2 - (1- bricks[I].y.x), 0)
 
         for j in range(cnt):
-            if j != I and contact(I,j):
+            if j != I and contact(I,j) and not jointed(I, j):
                 if contact_ev(I,j):
                     contact_point, _ = contact_point_x_or_y(I,j)
                     p_x[I] -= (Diameter - signed_distance(contact_point, I)) * nebla_sdf(contact_point, I).normalized()
@@ -568,12 +556,6 @@ def solve_v(cnt):
         global_v(cnt)
     v_x.copy_from(q_vx)
     v_y.copy_from(q_vy)
-# @ti.kernel
-# def collision_projection(i: ti.i32):
-#     for j in range(cnt):
-#         pass
-#         # if xc(j):
-
         
 @ti.kernel
 def check_fenwick(I:ti.i32, cnt: ti.i32) -> ti.i32:
@@ -643,9 +625,9 @@ def preview_possible_assemble(m: ti.ext_arr(), mxy: ti.ext_arr(), ret: ti.ext_ar
 
 # window = ti.ui.Window('Implicit Mass Spring System', res=(500, 500))
 gui = ti.GUI("LEGO master breaker", res=(res, res))
-        
+
+init, n_joints = init_case_3, 1
 cnt = init()
-n_joints = 0
 _grid, _grad = probe_grid_sdf(0)
 mxy = np.zeros((2,2),dtype = np.float32)
 mcnt = 0
