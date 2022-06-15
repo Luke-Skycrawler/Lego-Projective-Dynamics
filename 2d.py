@@ -15,9 +15,10 @@ Diameter = diameter / res
 n_jacobian_iters = 100
 n2_jacobian_iters = 1
 epsilon = 1. + 0.
-dt = 5e-4
+dt = 5e-5
+steps_per_frame = 10
 debug = False
-debug_v = True
+debug_v = False
 allow_cross = False
 flight = 5e-3
 worldl = lambda l: (l-1) * Diameter
@@ -167,6 +168,21 @@ def complete_joint():
     joints[j] = joints_preview_info[None]
     joints_lambda[j] = lambda_preview_info[None]
 
+@ti.func
+def _cross(a, b):   # vector a crosses b direction
+    return a - a.dot(b.normalized()) * b.normalized()
+
+@ti.func
+def add_dx(i, dx, lam):
+    r = bricks[i].y - bricks[i].x
+    b = ti.abs(lam - .5) > zero
+    dx_p = _cross(dx / 2, r)
+    # rot: minimized rotation estimation to preserve the DoF
+    
+    p_x[i] += (dx - dx_p + dx_p * 0.5/(lam-0.5)) if b else dx
+    p_y[i] += (dx - dx_p - dx_p * 0.5/(lam-0.5)) if b else dx
+    contacts[i] += 1
+
 @ti.kernel
 def solve_joints():
     for j in joints:
@@ -174,12 +190,17 @@ def solve_joints():
             i1, i2 = joints[j].x, joints[j].y
             x1 = mingle(i1, joints_lambda[j].x)
             x2 = mingle(i2, joints_lambda[j].y)
-            p_x[i1] += x2 - x1
-            p_y[i1] += x2 - x1
-            p_x[i2] += x1 - x2
-            p_y[i2] += x1 - x2
-            contacts[i1] += 1
-            contacts[i2] += 1
+            dx = x2 - x1
+
+            add_dx(i1, dx, joints_lambda[j].x)
+            add_dx(i2, -dx, joints_lambda[j].y)
+            
+            # p_x[i1] += dx
+            # p_y[i1] += dx
+            # p_x[i2] -= dx
+            # p_y[i2] -= dx
+            # contacts[i1] += 1
+            # contacts[i2] += 1
 
 @ti.kernel
 def global_v(cnt: ti.i32):
@@ -289,7 +310,7 @@ gui = ti.GUI("LEGO master breaker", res=(res, res))
 
 from tests import Tests
 
-CASE = 2
+CASE = 3
 INIT_CASES, N_JOINTS_LIST = Tests(globals)
 init, n_joints = INIT_CASES[CASE], N_JOINTS_LIST[CASE]
 
@@ -307,6 +328,7 @@ JOINT_MODE = 1
 mode = BRICKS_MODE
 tmp_joint = np.zeros((2,), dtype = np.float32)
 new_joint_allowed = False
+jx = np.zeros((n_joints, 2), np.float32)
 while gui.running:
     
     l,x,y = [to_np(i,cnt-mcnt) for i in ['l','x','y']]
@@ -315,15 +337,18 @@ while gui.running:
         gui.circles(np.vstack([x, y]), radius = Radius, color = 0x0)
         v = np.vstack([v_x.to_numpy()[:cnt-mcnt + 1], v_y.to_numpy()[:cnt-mcnt + 1]]) / 100.0
         gui.arrows(np.vstack([x, y]), v, radius = 3, color= 0x888800)
-    
+    if n_joints > 0:
+        jx = np.zeros((n_joints, 2), np.float32)
+        get_joints_pos(jx)
     gui.circles(_grid, radius=3)
     gui.arrows(_grid, _grad, radius = 1)
     if not pause:
-        copy_x_to_s(q_x,q_y)
-        add_gravity(gravity)
-        solve_local_global(cnt, n_joints)
-        solve_v(cnt, n_joints)
-        # update_velocity()
+        for stps in range(steps_per_frame):
+            copy_x_to_s(q_x,q_y)
+            add_gravity(gravity)
+            solve_local_global(cnt, n_joints)
+            solve_v(cnt, n_joints)
+            # update_velocity()
     if gui.get_event(ti.GUI.PRESS):
         e = gui.event
         print(e.key)
@@ -393,8 +418,6 @@ while gui.running:
             gui.circle(m, color = 0xffffff, radius = Radius * 0.8)
         
     if n_joints > 0:
-        jx = np.zeros((n_joints, 2), np.float32)
-        get_joints_pos(jx)
         gui.circles(jx, color = 0xffffff, radius = Radius * 0.8)
     gui.show()
 

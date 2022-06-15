@@ -169,7 +169,6 @@ def Bricks(globals, signed_distance, inv, contact_ev, contact, jointed, nebla_sd
                     impact = ti.abs(1 * v_minus / (2 + 12 / worldl(7) ** 2 * (cross_2d(n, ra) + cross_2d(n, rb))))
                     if ti.static(debug_v) and impact > 0.02:
                         print(f'v- = {v_minus}, impact = {impact}, lam = {lam}, {sign}, n = [{n[0]},{n[1]}]')
-                    # sin_theta = ti.abs(((rb1 - rbc) / worldl(7)).dot(r)) if not (b1 and b2) else ti.abs(n.cross((rb1 - rbc) / worldl(7)))
                     sin_theta = ti.abs(n.cross(rb1 - rbc)) / worldl(7)
                     sin_theta_2 = ti.abs(n.cross(pa - rac)) / worldl(7)
                     n2 = inv((rb1 - rbc).normalized())
