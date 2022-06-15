@@ -15,7 +15,7 @@ Diameter = diameter / res
 worldl = lambda l: (l-1) * Diameter
 n_jacobian_iters = 100
 n2_jacobian_iters = 1
-epsilon = 1. + 1.
+epsilon = 1. + 0.
 dt = 5e-4
 debug = False
 debug_v = False
@@ -57,6 +57,7 @@ tmp_dense_matrix = ti.field(ti.u8, (100,100))
 # temporary joint info 
 joints_preview_info = ti.Vector.field(2, dtype = ti.i32, shape = ())
 completed_joint_number = ti.field(dtype = ti.i32, shape = ())
+jn = ti.field(dtype = ti.i32, shape = ())
 lambda_preview_info = ti.Vector.field(2, dtype = float, shape = ())
 
 
@@ -102,10 +103,10 @@ def init_case_3() -> ti.i32:    # for testing joints
         'y': y3,
         'l': 7,  # length
     })
-    joints[0] = ti.Vector([0, 1])
-    joints_lambda[0] = ti.Vector([1/3, 1.0])
+    joints[0] = ti.Vector([0,1])
+    joints_lambda[0] = ti.Vector([1/3, 1.])
     # print(f'jointed(0,1) = {jointed(0,1)}')
-    v_x[0] = v_y[0] = -ey * 5
+    v_x[0] = v_y[0] = ey * 5
     v_x[1] = v_y[1] = -ey * 5
     return 2
 
@@ -351,6 +352,7 @@ def jointed(b1, b2):
         I, J = joints[j].x, joints[j].y 
         if (I == b1 and J == b2) or (I == b2 and J == b1):
             ret += 1
+            jn[None] = j
     return ret
 
 @ti.kernel
@@ -448,44 +450,60 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
 
         for j in range(cnt):
             b1, b2, b3 = contact_ev(i, j), contact_ev(j, i), jointed(i, j)
-            if j != i and (b1 or b2):
+            if (j != i and (b1 or b2)) or b3:
         
                 # default contact_ev, on x
                 I, J = i, j 
-
-                if b2 and not b1: 
+                cj = 0
+                # FIXME: should make it jn[None] but bug in `jointed` func  
+                if b3:
+                    I, J = joints[cj].x, joints[cj].y
+                elif b2 and not b1: 
                     I, J = j, i
                 elif b2 and b1 and j < i:   # avoid handling twice
                     I, J = j, i
                     # so far I < J or J point-contact on I's edge
 
                 t, sign = contact_point_x_or_y(I,J)                
-                lam = contact_point_on_edge(I, t)
+                lam = contact_point_on_edge(I, t) if not b3 else joints_lambda[cj].x
+                lam2 = joints_lambda[cj].y
+                '''
+                b3 content explained : lazy implementation, 
+                    use the oritation of relative v as n, and epsilon = 0,
+                    such that the bricks sticks together at joints 
+                '''
+                ve_0 = lam * v_x[I] + (1 - lam) * v_y[I]
+                vv_0 = lam2 * v_x[J] + (1 - lam2) * v_y[J] if b3 else v_x[J] if sign else v_y[J]
+                # FIXME: choice of v_x and q_vx
+
                 r = (bricks[I].y - bricks[I].x).normalized()
                 n = inv(r) 
                 n *= (1 if n.dot(bricks[J].x - bricks[I].x) > 0 else -1)
+                if b3 :
+                    n = -((ve_0 - vv_0).normalized()) 
                 nl = n
                 pa = lam * bricks[I].x + (1-lam) * bricks[I].y
-                rb1 = bricks[J].x if sign else bricks[J].y
+                pb = lam2 * bricks[J].x + (1-lam2) * bricks[J].y
+                rb1 = pb if b3 else bricks[J].x if sign else bricks[J].y
                 rbc = (bricks[J].x + bricks[J].y) /2
-                rb2 = rbc * 2 - rb1
+                # rb2 = rbc * 2 - rb1
                 rac = (bricks[I].x + bricks[I].y) /2
-                ve_0 = lam * v_x[I] + (1 - lam) * v_y[I]
-                vv_0 = v_x[J] if sign else v_y[J]
-                # FIXME: choice of v_x and q_vx
 
                 # if lam == 0. or lam == 1.:
-                if b1 and b2:
+                if not b3 and b1 and b2:
                     # handle point-point contact
                     n = (t - pa).normalized()
 
-                v_minus = max(n.dot(ve_0 - vv_0), 0)
+                v_minus = max(n.dot(ve_0 - vv_0), 0) if not b3 else (ve_0-vv_0).norm()
                 # no need to re-adjust v_minus for point-point contact
                 
-                ra, rb = pa - rac + n * Diameter/2, -n * Diameter/2 + rb1 - rbc
-                impact = ti.abs(2 * v_minus / (2 + 12 / worldl(7) ** 2 * (cross_2d(n, ra) + cross_2d(n, rb))))
+                ra, rb = pa - rac + n * Diameter/2, -n * Diameter/2 + rb1 - rbc 
+                if b3:
+                    ra, rb = pa - rac, rb1 - rbc
+                # epsilon = 1. if not b3 else 0.
+                impact = ti.abs(1 * v_minus / (2 + 12 / worldl(7) ** 2 * (cross_2d(n, ra) + cross_2d(n, rb))))
                 if ti.static(debug_v) and impact > 0.02:
-                    print(f'v- = {v_minus}, impact = {impact}, lam = {lam}, {sign}')
+                    print(f'v- = {v_minus}, impact = {impact}, lam = {lam}, {sign}, n = [{n[0]},{n[1]}]')
                 # sin_theta = ti.abs(((rb1 - rbc) / worldl(7)).dot(r)) if not (b1 and b2) else ti.abs(n.cross((rb1 - rbc) / worldl(7)))
                 sin_theta = ti.abs(n.cross(rb1 - rbc)) / worldl(7)
                 sin_theta_2 = ti.abs(n.cross(pa - rac)) / worldl(7)
@@ -493,7 +511,21 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
                 n2 *= 1 if n2.dot(n) > 0 else -1
 
                 px = py = ti.Vector.zero(float, 2)
-                if (b1 and not b2): # or (b1 and b2 and i < j):
+                if b3: 
+                    t1 = t2 = ti.Vector.zero(float, 2)
+                    if i == I:
+                        t1 = impact * (n + (lam - 0.5) * 6 * (n - n.dot(ra) * ra / ra.norm_sqr()))
+                        t2 = impact * (n - (lam - 0.5) * 6 * (n - n.dot(ra) * ra / ra.norm_sqr()))
+                    else:
+
+                        t1 = -impact * (n + (lam2 - 0.5) * 6 * (n - n.dot(rb) * rb / rb.norm_sqr()))
+                        t2 = -impact * (n - (lam2 - 0.5) * 6 * (n - n.dot(rb) * rb / rb.norm_sqr()))
+                    px += t1
+                    py += t2
+                    if ti.static(debug_v):
+                        print(f'i = {i}, px, py = [{t1[0]},{t1[1]}], [{t2[0]},{t2[1]}]')
+
+                elif (b1 and not b2): # or (b1 and b2 and i < j):
                     px += impact * (-n - (lam - 0.5) * 6 * nl)
                     py += impact * (-n + (lam - 0.5) * 6 * nl)
                 elif b1 and b2 and i < j:
@@ -626,7 +658,11 @@ def preview_possible_assemble(m: ti.ext_arr(), mxy: ti.ext_arr(), ret: ti.ext_ar
 # window = ti.ui.Window('Implicit Mass Spring System', res=(500, 500))
 gui = ti.GUI("LEGO master breaker", res=(res, res))
 
-init, n_joints = init_case_3, 1
+CASE = 2
+INIT_CASES = [init_case_1, init_case_2, init_case_3]
+N_JOINTS_LIST = [0, 0, 1]
+init, n_joints = INIT_CASES[CASE], N_JOINTS_LIST[CASE]
+
 cnt = init()
 _grid, _grad = probe_grid_sdf(0)
 mxy = np.zeros((2,2),dtype = np.float32)
@@ -663,8 +699,9 @@ while gui.running:
         print(e.key)
         if e.key == 'r' or e.key =='c':
             container.deactivate_all()
+            joints_container.deactivate_all()
             cnt = init() if e.key == 'r' else 0
-            n_joints = 0
+            n_joints = N_JOINTS_LIST[CASE]
         elif e.key == 's':
             pause = not pause
         elif e.key == 'g':
