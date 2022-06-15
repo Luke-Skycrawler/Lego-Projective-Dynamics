@@ -5,19 +5,19 @@ import numpy as np
 dim = 2
 max_bricks, max_joints = 1000, 500
 chunk = 1
-res = 512
+res = 1024
 grid = 16
-radius = 20
-Radius = 18
+radius = 10
+Radius = 9
 diameter = 2 * radius
-zero = -1e-9
+zero = 1e-9
 Diameter = diameter / res
 n_jacobian_iters = 100
 n2_jacobian_iters = 1
 epsilon = 1. + 0.
 dt = 5e-4
 debug = False
-debug_v = False
+debug_v = True
 allow_cross = False
 flight = 5e-3
 worldl = lambda l: (l-1) * Diameter
@@ -360,7 +360,7 @@ while gui.running:
                         complete_joint()
                     _grid, _grad = probe_grid_sdf(cnt)
                     cnt += 1      
-                    solve_local_global(cnt)
+                    solve_local_global(cnt, n_joints)
             elif mode == JOINT_MODE and new_joint_allowed: # joint mode
                 add_joint(n_joints, tmp_joint)
                 n_joints += 1

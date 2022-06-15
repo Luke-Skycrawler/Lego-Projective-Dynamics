@@ -138,13 +138,14 @@ def Bricks(globals, signed_distance, inv, contact_ev, contact, jointed, nebla_sd
                     '''
                     ve_0 = lam * v_x[I] + (1 - lam) * v_y[I]
                     vv_0 = lam2 * v_x[J] + (1 - lam2) * v_y[J] if b3 else v_x[J] if sign else v_y[J]
+                    v_rel = ve_0 - vv_0
                     # FIXME: choice of v_x and q_vx
 
                     r = (bricks[I].y - bricks[I].x).normalized()
                     n = inv(r) 
                     n *= (1 if n.dot(bricks[J].x - bricks[I].x) > 0 else -1)
-                    if b3 :
-                        n = -((ve_0 - vv_0).normalized()) 
+                    if b3 and v_rel.norm() > zero:
+                        n = -(v_rel.normalized()) 
                     nl = n
                     pa = lam * bricks[I].x + (1-lam) * bricks[I].y
                     pb = lam2 * bricks[J].x + (1-lam2) * bricks[J].y
@@ -158,7 +159,7 @@ def Bricks(globals, signed_distance, inv, contact_ev, contact, jointed, nebla_sd
                         # handle point-point contact
                         n = (t - pa).normalized()
 
-                    v_minus = max(n.dot(ve_0 - vv_0), 0) if not b3 else (ve_0-vv_0).norm()
+                    v_minus = max(n.dot(v_rel), 0) if not b3 else v_rel.norm()
                     # no need to re-adjust v_minus for point-point contact
                     
                     ra, rb = pa - rac + n * Diameter/2, -n * Diameter/2 + rb1 - rbc 
@@ -176,19 +177,23 @@ def Bricks(globals, signed_distance, inv, contact_ev, contact, jointed, nebla_sd
 
                     px = py = ti.Vector.zero(float, 2)
                     if b3: 
-                        t1 = t2 = ti.Vector.zero(float, 2)
+                        rot = t1 = t2 = ti.Vector.zero(float, 2)
+                        _r, _lam = ra, lam 
+                        if i != I:
+                            _r, _lam = rb, lam2
+                        if _r.norm() > zero:
+                            rot = (_lam - 0.5) * 6 * (n - n.dot(_r) * _r / _r.norm_sqr())
                         if i == I:
-                            t1 = impact * (n + (lam - 0.5) * 6 * (n - n.dot(ra) * ra / ra.norm_sqr()))
-                            t2 = impact * (n - (lam - 0.5) * 6 * (n - n.dot(ra) * ra / ra.norm_sqr()))
+                            t1 = impact * (n + rot)
+                            t2 = impact * (n - rot)
                         else:
+                            t1 = -impact * (n + rot)
+                            t2 = -impact * (n - rot)
 
-                            t1 = -impact * (n + (lam2 - 0.5) * 6 * (n - n.dot(rb) * rb / rb.norm_sqr()))
-                            t2 = -impact * (n - (lam2 - 0.5) * 6 * (n - n.dot(rb) * rb / rb.norm_sqr()))
                         px += t1
                         py += t2
                         if ti.static(debug_v):
                             print(f'i = {i}, px, py = [{t1[0]},{t1[1]}], [{t2[0]},{t2[1]}]')
-
                     elif (b1 and not b2): # or (b1 and b2 and i < j):
                         px += impact * (-n - (lam - 0.5) * 6 * nl)
                         py += impact * (-n + (lam - 0.5) * 6 * nl)

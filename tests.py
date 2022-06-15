@@ -1,10 +1,6 @@
 import taichi as ti
 def Tests(globals):
     grid = globals.grid
-    radius = globals.radius
-    Radius = globals.Radius
-    diameter = globals.diameter
-    zero = globals.zero
     Diameter = globals.Diameter
     ex = globals.ex
     ey = globals.ey
@@ -49,6 +45,45 @@ def Tests(globals):
         # print(f'jointed(0,1) = {jointed(0,1)}')
         v_x[0] = v_y[0] = ey * 5
         v_x[1] = v_y[1] = -ey * 5
+        return 3
+
+    @ti.kernel
+    def init_case_4() -> ti.i32:    # for testing joints
+        for I in ti.grouped(probes):
+            probes[I] = (I + 0.5) / grid
+        x2 = ti.Vector([0.1, 0.2])
+        y2 = x2 + ey * worldl(7)
+        
+        x3 = x2 + ey * worldl(2)
+        y3 = x3 + ex * worldl(7)
+        
+        e4 = ti.Vector([-0.6, +0.8])
+        x4 = x3 + ex * worldl(4)
+        y4 = x4 + e4 * worldl(7)
+        bricks[0] = ti.Struct({
+            'x': x2, 
+            'y': y2,
+            'l': 7,  # length
+        })
+        bricks[1] = ti.Struct({
+            'x': x3, 
+            'y': y3,
+            'l': 7,  # length
+        })
+        bricks[2] = ti.Struct({
+            'x': x4, 
+            'y': y4,
+            'l': 7,  # length
+        })
+        joints[0] = ti.Vector([0,1])
+        joints[1] = ti.Vector([2,1])
+        joints[2] = ti.Vector([0,2])
+        joints_lambda[0] = ti.Vector([5/6, 1.])
+        joints_lambda[1] = ti.Vector([1., 3/6])
+        joints_lambda[2] = ti.Vector([1/6, 1/6])
+        # print(f'jointed(0,1) = {jointed(0,1)}')
+        # v_x[0] = v_y[0] = ey * 5
+        # v_x[1] = v_y[1] = -ey * 5
         return 3
 
             
@@ -107,7 +142,7 @@ def Tests(globals):
         v_x[1] = v_y[1] = ex * 5
 
         return 2
-    INIT_CASES = [init_case_1, init_case_2, init_case_3]
-    N_JOINTS_LIST = [0, 0, 2]
+    INIT_CASES = [init_case_1, init_case_2, init_case_3, init_case_4]
+    N_JOINTS_LIST = [0, 0, 2, 3]
 
     return INIT_CASES, N_JOINTS_LIST
