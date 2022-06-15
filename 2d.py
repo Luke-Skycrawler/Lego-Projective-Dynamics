@@ -57,9 +57,10 @@ tmp_dense_matrix = ti.field(ti.u8, (100,100))
 # temporary joint info 
 joints_preview_info = ti.Vector.field(2, dtype = ti.i32, shape = ())
 completed_joint_number = ti.field(dtype = ti.i32, shape = ())
-jn = ti.field(dtype = ti.i32, shape = ())
-lambda_preview_info = ti.Vector.field(2, dtype = float, shape = ())
 
+lambda_preview_info = ti.Vector.field(2, dtype = float, shape = ())
+jn = ti.field(dtype = ti.i32)
+container.place(jn)
 
 ti.root.lazy_grad()
 
@@ -93,6 +94,9 @@ def init_case_3() -> ti.i32:    # for testing joints
     
     x3 = x2 + ey * worldl(5)
     y3 = x3 + ex * worldl(7)
+    
+    x4 = y3 - ey * worldl(2)
+    y4 = x4 + ey * worldl(7)
     bricks[0] = ti.Struct({
         'x': x2, 
         'y': y2,
@@ -103,12 +107,19 @@ def init_case_3() -> ti.i32:    # for testing joints
         'y': y3,
         'l': 7,  # length
     })
+    bricks[2] = ti.Struct({
+        'x': x4, 
+        'y': y4,
+        'l': 7,  # length
+    })
     joints[0] = ti.Vector([0,1])
+    joints[1] = ti.Vector([2,1])
     joints_lambda[0] = ti.Vector([1/3, 1.])
-    # print(f'jointed(0,1) = {jointed(0,1)}')
+    joints_lambda[1] = ti.Vector([5/6, 0.])
+    print(f'jointed(0,1) = {jointed(0,1)}')
     v_x[0] = v_y[0] = ey * 5
     v_x[1] = v_y[1] = -ey * 5
-    return 2
+    return 3
 
         
 @ti.kernel
@@ -178,11 +189,6 @@ def test_wrapper(cnt: ti.i32):
     for i in ti.grouped(probes):
         probes.grad[i] = nebla_sdf(probes[i], cnt)
 
-
-# def draw_all(ggui):
-#     to_np = lambda x: bricks.get_member_field(x).to_numpy()
-#     l,x,r = [to_np(i) for i in ['l','x','r']]
-#     ggui.lines(r,l,x, radius) 
     
 @ti.kernel
 def preview_brick(arr:ti.ext_arr(), cnt: ti.i32):
@@ -352,7 +358,7 @@ def jointed(b1, b2):
         I, J = joints[j].x, joints[j].y 
         if (I == b1 and J == b2) or (I == b2 and J == b1):
             ret += 1
-            jn[None] = j
+            jn[b1] = j
     return ret
 
 @ti.kernel
@@ -454,8 +460,7 @@ def project_v(cnt: ti.i32, v_x:ti.template(), v_y: ti.template(), q_vx: ti.templ
         
                 # default contact_ev, on x
                 I, J = i, j 
-                cj = 0
-                # FIXME: should make it jn[None] but bug in `jointed` func  
+                cj = jn[i]
                 if b3:
                     I, J = joints[cj].x, joints[cj].y
                 elif b2 and not b1: 
@@ -660,7 +665,7 @@ gui = ti.GUI("LEGO master breaker", res=(res, res))
 
 CASE = 2
 INIT_CASES = [init_case_1, init_case_2, init_case_3]
-N_JOINTS_LIST = [0, 0, 1]
+N_JOINTS_LIST = [0, 0, 2]
 init, n_joints = INIT_CASES[CASE], N_JOINTS_LIST[CASE]
 
 cnt = init()
